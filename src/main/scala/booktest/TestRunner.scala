@@ -7,7 +7,8 @@ case class RunConfig(
   outputDir: Path = os.pwd / "books",
   snapshotDir: Path = os.pwd / "books",
   verbose: Boolean = false,
-  interactive: Boolean = false
+  interactive: Boolean = false,
+  testFilter: Option[String] = None
 )
 
 case class RunResult(
@@ -25,6 +26,7 @@ case class RunResult(
 }
 
 class TestRunner(config: RunConfig = RunConfig()) {
+  private val dependencyCache = new DependencyCache()
   
   def runSuite(suite: TestSuite): RunResult = {
     val suiteName = suite.suiteName
@@ -35,7 +37,13 @@ class TestRunner(config: RunConfig = RunConfig()) {
       println(s"Found ${testCases.length} test(s)")
     }
     
-    val results = testCases.map(runTestCase(_, suiteName))
+    val filteredTests = config.testFilter match {
+      case Some(pattern) => testCases.filter(_.name.contains(pattern))
+      case None => testCases
+    }
+    
+    val sortedTests = resolveDependencyOrder(filteredTests)
+    val results = sortedTests.map(runTestCase(_, suiteName))
     
     val passedCount = results.count(_.passed)
     val failedCount = results.count(!_.passed)
@@ -65,16 +73,27 @@ class TestRunner(config: RunConfig = RunConfig()) {
         println(s"  Running: ${testCase.name}")
       }
       
-      testCase.testFunction(testRun)
+      val returnValue = testCase.testFunction(testRun)
       
-      val result = SnapshotManager.compareTest(testRun)
+      val result = SnapshotManager.compareTest(testRun).copy(returnValue = Some(returnValue))
       testRun.writeOutput()
       
-      if (config.verbose || !result.passed) {
-        SnapshotManager.printTestResult(result)
+      if (result.passed) {
+        dependencyCache.put(testCase.name, returnValue)
       }
       
-      result
+      val shouldAccept = if (config.verbose || !result.passed) {
+        SnapshotManager.printTestResult(result, config.interactive)
+      } else {
+        false
+      }
+      
+      if (shouldAccept && !result.passed) {
+        SnapshotManager.updateSnapshot(testRun)
+        result.copy(passed = true)
+      } else {
+        result
+      }
       
     } catch {
       case e: Exception =>
@@ -107,5 +126,27 @@ class TestRunner(config: RunConfig = RunConfig()) {
       failedTests = totalFailed,
       results = allTestResults
     )
+  }
+  
+  private def resolveDependencyOrder(testCases: List[TestCase]): List[TestCase] = {
+    val testMap = testCases.map(tc => tc.name -> tc).toMap
+    val visited = scala.collection.mutable.Set[String]()
+    val result = scala.collection.mutable.ListBuffer[TestCase]()
+    
+    def visit(testName: String): Unit = {
+      if (!visited.contains(testName)) {
+        visited += testName
+        testMap.get(testName) match {
+          case Some(testCase) =>
+            testCase.dependencies.foreach(visit)
+            result += testCase
+          case None =>
+            throw new IllegalArgumentException(s"Dependency '$testName' not found")
+        }
+      }
+    }
+    
+    testCases.foreach(tc => visit(tc.name))
+    result.toList
   }
 }

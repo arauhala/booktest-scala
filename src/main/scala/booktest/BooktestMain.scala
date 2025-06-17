@@ -7,6 +7,7 @@ object BooktestMain {
     var interactive = false
     var outputDir = "books"
     var snapshotDir = "books"
+    var testFilter: Option[String] = None
     val testClasses = scala.collection.mutable.ListBuffer[String]()
     
     var i = 0
@@ -20,6 +21,9 @@ object BooktestMain {
         case "--snapshot-dir" =>
           i += 1
           if (i < args.length) snapshotDir = args(i)
+        case "--test-filter" | "-t" =>
+          i += 1
+          if (i < args.length) testFilter = Some(args(i))
         case "--help" | "-h" =>
           printHelp()
           return
@@ -36,7 +40,8 @@ object BooktestMain {
       outputDir = os.pwd / outputDir,
       snapshotDir = os.pwd / snapshotDir,
       verbose = verbose,
-      interactive = interactive
+      interactive = interactive,
+      testFilter = testFilter
     )
     
     val runner = new TestRunner(config)
@@ -86,10 +91,13 @@ object BooktestMain {
     println("  -i, --interactive   Interactive mode (not yet implemented)")
     println("  --output-dir DIR    Output directory for test results (default: books)")
     println("  --snapshot-dir DIR  Snapshot directory (default: books)")
+    println("  -t, --test-filter   Filter tests by name pattern")
     println("  -h, --help          Show this help message")
     println()
     println("Examples:")
     println("  booktest booktest.examples.ExampleTests")
     println("  booktest -v booktest.examples.ExampleTests")
+    println("  booktest -t Data booktest.examples.DependencyTests")
+    println("  booktest -i booktest.examples.FailingTest")
   }
 }

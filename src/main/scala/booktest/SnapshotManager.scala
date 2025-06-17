@@ -7,7 +7,8 @@ case class TestResult(
   passed: Boolean,
   output: String,
   snapshot: Option[String] = None,
-  diff: Option[String] = None
+  diff: Option[String] = None,
+  returnValue: Option[Any] = None
 )
 
 object SnapshotManager {
@@ -71,15 +72,24 @@ object SnapshotManager {
     diffLines.mkString("\n")
   }
   
-  def printTestResult(result: TestResult): Unit = {
+  def printTestResult(result: TestResult, interactive: Boolean = false): Boolean = {
     if (result.passed) {
       println(Color.Green(s"✓ ${result.testName}"))
+      false
     } else {
       println(Color.Red(s"✗ ${result.testName}"))
       result.diff.foreach { diff =>
         println(s"\nDiff for ${result.testName}:")
         println(diff)
         println()
+      }
+      
+      if (interactive) {
+        print(s"Accept changes for ${result.testName}? (y/N): ")
+        val input = scala.io.StdIn.readLine().trim.toLowerCase
+        input == "y" || input == "yes"
+      } else {
+        false
       }
     }
   }

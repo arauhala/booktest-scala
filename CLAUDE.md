@@ -56,6 +56,12 @@ sbt "Test/runMain booktest.BooktestMain --help"
 
 # Run all available test classes
 sbt "Test/runMain booktest.BooktestMain -v booktest.examples.ExampleTests booktest.examples.FailingTest"
+
+# Test filtering by name pattern
+sbt "Test/runMain booktest.BooktestMain -v -t Data booktest.examples.DependencyTests"
+
+# Interactive mode (for snapshot updates)
+sbt "Test/runMain booktest.BooktestMain -i booktest.examples.FailingTest"
 ```
 
 ## Test API Design
@@ -71,22 +77,39 @@ class ExampleTests extends TestSuite {
     t.tln("Output line checked against snapshot")
     t.i("Info line not checked against snapshot")
   }
+  
+  def testCreateData(t: TestCaseRun): String = {
+    t.tln("Creating data...")
+    "some_data"
+  }
+  
+  @dependsOn("createData")
+  def testUseData(t: TestCaseRun): Unit = {
+    t.tln("This test runs after createData")
+  }
 }
 ```
 
 ## Implementation Status
 
-This is a migration in progress. Current phase focuses on:
-- Core snapshot testing functionality
-- Sequential test execution  
-- Basic CLI interface
-- Markdown output generation
+**Phase 1 Complete**: Core snapshot testing framework
+- ✅ TestCaseRun API with tln(), h1(), i(), iln() methods
+- ✅ Test discovery and execution
+- ✅ Snapshot comparison with diffs
+- ✅ CLI interface
+
+**Phase 2 Complete**: Advanced features
+- ✅ @dependsOn annotation for test dependencies
+- ✅ Dependency resolution and execution ordering
+- ✅ Cached return values between dependent tests
+- ✅ Test filtering by name patterns (-t option)
+- ✅ Interactive mode for snapshot updates (-i option)
 
 Not yet implemented:
 - Parallel execution
 - HTTP/environment snapshotting
-- Complex dependency management
-- Interactive review mode
+- Resource management
+- Complex multi-parameter dependency injection
 
 ## Migration Reference
 

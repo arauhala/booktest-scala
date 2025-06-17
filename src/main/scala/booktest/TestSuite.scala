@@ -5,7 +5,7 @@ abstract class TestSuite {
   
   lazy val testCases: List[TestCase] = discoverTests()
   
-  protected def registerTest(name: String, testFunction: TestCaseRun => Unit): Unit = {
+  protected def registerTest(name: String, testFunction: TestCaseRun => Any): Unit = {
     _testCases = _testCases :+ TestCase(name, testFunction)
   }
   
@@ -22,11 +22,25 @@ abstract class TestSuite {
     testMethods.map { method =>
       method.setAccessible(true)
       val testName = cleanMethodName(method.getName)
-      val testFunction: TestCaseRun => Unit = { tcr =>
+      val dependencies = extractDependencies(method)
+      val testFunction: TestCaseRun => Any = { tcr =>
         method.invoke(this, tcr)
       }
-      TestCase(testName, testFunction)
+      TestCase(testName, testFunction, dependencies)
     }.toList ++ _testCases
+  }
+  
+  private def extractDependencies(method: java.lang.reflect.Method): List[String] = {
+    val annotations = method.getAnnotations
+    annotations.collectFirst {
+      case annotation if annotation.annotationType().getSimpleName == "dependsOn" =>
+        try {
+          val dependenciesMethod = annotation.annotationType().getMethod("dependencies")
+          dependenciesMethod.invoke(annotation).asInstanceOf[Array[String]].toList
+        } catch {
+          case _: Exception => List.empty[String]
+        }
+    }.getOrElse(List.empty)
   }
   
   private def cleanMethodName(methodName: String): String = {
