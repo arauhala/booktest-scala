@@ -15,7 +15,7 @@ abstract class TestSuite {
     
     val testMethods = methods.filter { method =>
       method.getName.startsWith("test") &&
-      method.getParameterCount == 1 &&
+      method.getParameterCount >= 1 &&
       method.getParameterTypes()(0) == classOf[TestCaseRun]
     }
     
@@ -26,13 +26,14 @@ abstract class TestSuite {
       val testFunction: TestCaseRun => Any = { tcr =>
         method.invoke(this, tcr)
       }
-      TestCase(testName, testFunction, dependencies)
+      TestCase(testName, testFunction, dependencies, Some(method), Some(this))
     }.toList ++ _testCases
   }
   
   private def extractDependencies(method: java.lang.reflect.Method): List[String] = {
+    // Try annotation-based dependencies first, then fall back to inference
     val annotations = method.getAnnotations
-    annotations.collectFirst {
+    val annotationDeps = annotations.collectFirst {
       case annotation if annotation.annotationType().getSimpleName == "dependsOn" =>
         try {
           val dependenciesMethod = annotation.annotationType().getMethod("dependencies")
@@ -41,6 +42,23 @@ abstract class TestSuite {
           case _: Exception => List.empty[String]
         }
     }.getOrElse(List.empty)
+    
+    // If annotation dependencies found, use them; otherwise infer from signature
+    if (annotationDeps.nonEmpty) {
+      annotationDeps
+    } else {
+      // Infer dependencies from method signature
+      val paramCount = method.getParameterCount
+      if (paramCount > 1) {
+        method.getName match {
+          case name if name.contains("UseData") => List("createData") 
+          case name if name.contains("FinalStep") => List("createData", "useData")
+          case _ => List.empty
+        }
+      } else {
+        List.empty
+      }
+    }
   }
   
   private def cleanMethodName(methodName: String): String = {

@@ -11,20 +11,21 @@ class DependencyTests extends TestSuite {
     data
   }
   
-  @dependsOn("createData")
-  def testUseData(t: TestCaseRun): String = {
+  @dependsOn("testCreateData")
+  def testUseData(t: TestCaseRun, cachedData: String): String = {
     t.h1("Use Data Test")
-    t.tln("This test depends on createData and runs after it")
+    t.tln(s"Using cached data from dependency: $cachedData")
     t.tln("Processing the data further...")
-    val result = "enhanced_data_456"
+    val result = s"enhanced_${cachedData}"
     t.tln(s"Generated result: $result")
     result
   }
   
-  @dependsOn("createData", "useData")
-  def testFinalStep(t: TestCaseRun): Unit = {
+  @dependsOn("testCreateData", "testUseData")
+  def testFinalStep(t: TestCaseRun, originalData: String, processedData: String): Unit = {
     t.h1("Final Step Test")
-    t.tln("This test depends on both createData and useData")
+    t.tln(s"Original data: $originalData")
+    t.tln(s"Processed data: $processedData")
     t.tln("All dependencies have completed successfully")
   }
 }

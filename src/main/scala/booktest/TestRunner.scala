@@ -26,7 +26,8 @@ case class RunResult(
 }
 
 class TestRunner(config: RunConfig = RunConfig()) {
-  private val dependencyCache = new DependencyCache()
+  private val cacheDir = config.outputDir / ".cache"
+  private val dependencyCache = new DependencyCache(cacheDir)
   
   def runSuite(suite: TestSuite): RunResult = {
     val suiteName = suite.suiteName
@@ -73,7 +74,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
         println(s"  Running: ${testCase.name}")
       }
       
-      val returnValue = testCase.testFunction(testRun)
+      val returnValue = executeTestWithDependencies(testCase, testRun)
       
       val result = SnapshotManager.compareTest(testRun).copy(returnValue = Some(returnValue))
       testRun.writeOutput()
@@ -148,5 +149,40 @@ class TestRunner(config: RunConfig = RunConfig()) {
     
     testCases.foreach(tc => visit(tc.name))
     result.toList
+  }
+  
+  private def executeTestWithDependencies(testCase: TestCase, testRun: TestCaseRun): Any = {
+    testCase.method match {
+      case Some(method) if testCase.testInstance.isDefined =>
+        val instance = testCase.testInstance.get
+        val paramCount = method.getParameterCount
+        
+        if (paramCount == 1) {
+          // No dependencies, just TestCaseRun
+          method.invoke(instance, testRun)
+        } else {
+          // Has dependencies - need to inject cached values
+          if (config.verbose) {
+            println(s"    Looking for dependencies: ${testCase.dependencies}")
+          }
+          val dependencyValues = testCase.dependencies.map { depName =>
+            val cached = dependencyCache.get[Any](depName)
+            if (config.verbose) {
+              println(s"    Dependency '$depName': ${cached.isDefined}")
+            }
+            cached.getOrElse {
+              throw new IllegalStateException(s"Dependency '$depName' not found in cache for test '${testCase.name}'")
+            }
+          }
+          
+          // Create arguments array: TestCaseRun + dependency values
+          val args = Array[AnyRef](testRun) ++ dependencyValues.map(_.asInstanceOf[AnyRef])
+          method.invoke(instance, args: _*)
+        }
+        
+      case _ =>
+        // Fallback to original function
+        testCase.testFunction(testRun)
+    }
   }
 }
