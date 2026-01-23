@@ -2,8 +2,25 @@ package booktest
 
 import scala.annotation.StaticAnnotation
 
-// For now, we'll keep the annotation simple but use method signature inference
+// Main annotation using string names (current approach)
 case class dependsOn(dependencies: String*) extends StaticAnnotation
+
+// Helper for method name extraction from function references
+object MethodRef {
+  // This allows extracting method names using a simple naming convention
+  // Usage: @dependsOn(MethodRef.names(_.testCreateData, _.testUseData): _*)
+  
+  def names[T](refs: (T => Any)*): Array[String] = {
+    // For now, we use a convention-based approach since Scala 3 macros 
+    // for method name extraction are complex
+    // This is a placeholder that could be enhanced with macros later
+    refs.map(_.toString.split("\\.").last.replace("test", "").toLowerCase).toArray
+  }
+  
+  // Simplified approach: use method naming convention
+  // @dependsOn(MethodRef("testCreateData", "testUseData"): _*)
+  def apply(methodNames: String*): Array[String] = methodNames.toArray
+}
 
 case class DependencyResult[T](
   testName: String,

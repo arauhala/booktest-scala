@@ -5,7 +5,8 @@ case class TestCase(
   testFunction: TestCaseRun => Any,
   dependencies: List[String] = List.empty,
   method: Option[java.lang.reflect.Method] = None,
-  testInstance: Option[TestSuite] = None
+  testInstance: Option[TestSuite] = None,
+  originalFunction: Option[Any] = None  // Store original multi-param function
 )
 
 object TestCase {

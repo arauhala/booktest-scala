@@ -1,0 +1,31 @@
+# SBT build artifacts
+target/
+project/target/
+project/project/
+
+# IDE files
+.idea/
+.bsp/
+*.iml
+.metals/
+.bloop/
+.vscode/
+
+# Booktest runtime files (not committed to Git)
+books/.cache/
+books/.out/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.swp
+*.swo
+*~
+
+# Credentials and secrets
+*.pem
+*.key
+.env
+.env.local

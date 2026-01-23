@@ -1,0 +1,1 @@
+Test 'functionSnapshotWithArgs' completed in 67ms

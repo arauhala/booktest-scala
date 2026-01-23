@@ -1,0 +1,98 @@
+{
+  "697392673c87d4f069170b987e1baf7e0ff020f2": {
+    "request": {
+      "url": "https://jsonplaceholder.typicode.com/posts",
+      "method": "POST",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": [
+        "{\"title\": \"Test Post\", \"body\": \"This is a test\", \"userId\": 1}"
+      ]
+    },
+    "response": {
+      "statusCode": 200,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"url\": \"https://jsonplaceholder.typicode.com/posts\", \"method\": \"POST\", \"mock\": true}"
+    },
+    "hash": "697392673c87d4f069170b987e1baf7e0ff020f2"
+  },
+  "304479c318d268d3f78485284cba6befc8b2367a": {
+    "request": {
+      "url": "https://jsonplaceholder.typicode.com/users/1/posts",
+      "method": "GET"
+    },
+    "response": {
+      "statusCode": 200,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"url\": \"https://jsonplaceholder.typicode.com/users/1/posts\", \"method\": \"GET\", \"mock\": true}"
+    },
+    "hash": "304479c318d268d3f78485284cba6befc8b2367a"
+  },
+  "20cbd3e176ae51eaedfd2be0733d0c2c3e201b75": {
+    "request": {
+      "url": "https://jsonplaceholder.typicode.com/users/1",
+      "method": "GET"
+    },
+    "response": {
+      "statusCode": 200,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"url\": \"https://jsonplaceholder.typicode.com/users/1\", \"method\": \"GET\", \"mock\": true}"
+    },
+    "hash": "20cbd3e176ae51eaedfd2be0733d0c2c3e201b75"
+  },
+  "9084197813b19f57244fe5376421ba6113b50aa8": {
+    "request": {
+      "url": "https://api.github.com/users/octocat",
+      "method": "GET"
+    },
+    "response": {
+      "statusCode": 200,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"url\": \"https://api.github.com/users/octocat\", \"method\": \"GET\", \"mock\": true}"
+    },
+    "hash": "9084197813b19f57244fe5376421ba6113b50aa8"
+  },
+  "2291c01ee9dc5eec80237bbb297eaa566b3ce5f6": {
+    "request": {
+      "url": "https://jsonplaceholder.typicode.com/users",
+      "method": "POST",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": [
+        "{\"name\": \"Test User\", \"email\": \"test@example.com\"}"
+      ]
+    },
+    "response": {
+      "statusCode": 200,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"url\": \"https://jsonplaceholder.typicode.com/users\", \"method\": \"POST\", \"mock\": true}"
+    },
+    "hash": "2291c01ee9dc5eec80237bbb297eaa566b3ce5f6"
+  },
+  "8a3d909c29c2df4c407cfb7d9b04380d8acd83d6": {
+    "request": {
+      "url": "https://httpstat.us/404",
+      "method": "GET"
+    },
+    "response": {
+      "statusCode": 200,
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "body": "{\"url\": \"https://httpstat.us/404\", \"method\": \"GET\", \"mock\": true}"
+    },
+    "hash": "8a3d909c29c2df4c407cfb7d9b04380d8acd83d6"
+  }
+}
