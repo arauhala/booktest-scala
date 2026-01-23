@@ -1,31 +1,30 @@
 ThisBuild / version := "0.1.0-SNAPSHOT"
 ThisBuild / scalaVersion := "3.3.1"
 
-// TODO: Replace with your actual organization (e.g., "io.github.lumoa-oss")
-ThisBuild / organization := "io.github.lumoa-oss"
-ThisBuild / organizationName := "Lumoa Oss"
-ThisBuild / organizationHomepage := Some(url("https://github.com/lumoa-oss"))
+ThisBuild / organization := "io.github.arauhala"
+ThisBuild / organizationName := "arauhala"
+ThisBuild / organizationHomepage := Some(url("https://github.com/arauhala"))
 
 // Project metadata for Maven Central
 ThisBuild / description := "A review-driven snapshot testing framework for Scala"
-ThisBuild / homepage := Some(url("https://github.com/lumoa-oss/booktest-scala"))
+ThisBuild / homepage := Some(url("https://github.com/arauhala/booktest-scala"))
 ThisBuild / licenses := List("Apache-2.0" -> url("https://www.apache.org/licenses/LICENSE-2.0"))
 
 // Developer information
 ThisBuild / developers := List(
   Developer(
-    id = "lumoa-oss",
-    name = "Lumoa Oss",
-    email = "oss@lumoa.me",
-    url = url("https://github.com/lumoa-oss")
+    id = "arauhala",
+    name = "arauhala",
+    email = "", // Add your email if you want it public
+    url = url("https://github.com/arauhala")
   )
 )
 
 // Source control information
 ThisBuild / scmInfo := Some(
   ScmInfo(
-    url("https://github.com/lumoa-oss/booktest-scala"),
-    "scm:git@github.com:lumoa-oss/booktest-scala.git"
+    url("https://github.com/arauhala/booktest-scala"),
+    "scm:git@github.com:arauhala/booktest-scala.git"
   )
 )
 
