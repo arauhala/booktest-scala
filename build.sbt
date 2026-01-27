@@ -1,4 +1,4 @@
-ThisBuild / version := "0.1.0-SNAPSHOT"
+ThisBuild / version := "0.1.0"
 ThisBuild / scalaVersion := "3.3.1"
 
 ThisBuild / organization := "io.github.arauhala"
@@ -28,10 +28,10 @@ ThisBuild / scmInfo := Some(
   )
 )
 
-// Publishing configuration for Sonatype/Maven Central
+// Publishing configuration for Sonatype Central Portal (central.sonatype.com)
+ThisBuild / sonatypeCredentialHost := "central.sonatype.com"
+ThisBuild / sonatypeRepository := "https://central.sonatype.com/api/v1/publisher"
 ThisBuild / publishTo := sonatypePublishToBundle.value
-ThisBuild / sonatypeCredentialHost := "s01.oss.sonatype.org"
-ThisBuild / sonatypeRepository := "https://s01.oss.sonatype.org/service/local"
 
 lazy val root = (project in file("."))
   .settings(
