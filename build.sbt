@@ -1,5 +1,6 @@
 ThisBuild / version := "0.2.0-SNAPSHOT"
 ThisBuild / scalaVersion := "3.3.1"
+ThisBuild / crossScalaVersions := Seq("2.12.18", "2.13.12", "3.3.1")
 
 ThisBuild / organization := "io.github.arauhala"
 ThisBuild / organizationName := "arauhala"
@@ -47,7 +48,10 @@ lazy val root = (project in file("."))
     scalacOptions ++= Seq(
       "-deprecation",
       "-feature",
-      "-unchecked",
-      "-Wunused:all"
-    )
+      "-unchecked"
+    ) ++ (CrossVersion.partialVersion(scalaVersion.value) match {
+      case Some((3, _)) => Seq("-Wunused:all")
+      case Some((2, 13)) => Seq("-Wunused:imports,privates,locals")
+      case _ => Seq.empty
+    })
   )

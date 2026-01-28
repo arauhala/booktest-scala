@@ -2,26 +2,35 @@ package booktest
 
 import java.security.MessageDigest
 import java.util.Base64
-import upickle.default.*
+import upickle.default._
 
 case class HttpRequest(
   url: String,
   method: String,
   headers: Map[String, String] = Map.empty,
   body: Option[String] = None
-) derives ReadWriter
+)
+object HttpRequest {
+  implicit val rw: ReadWriter[HttpRequest] = macroRW
+}
 
 case class HttpResponse(
   statusCode: Int,
   headers: Map[String, String] = Map.empty,
   body: String = ""
-) derives ReadWriter
+)
+object HttpResponse {
+  implicit val rw: ReadWriter[HttpResponse] = macroRW
+}
 
 case class HttpSnapshot(
   request: HttpRequest,
   response: HttpResponse,
   hash: String
-) derives ReadWriter
+)
+object HttpSnapshot {
+  implicit val rw: ReadWriter[HttpSnapshot] = macroRW
+}
 
 class HttpSnapshotManager(testCaseRun: TestCaseRun) {
   

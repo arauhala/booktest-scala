@@ -2,15 +2,17 @@ package booktest
 
 import java.security.MessageDigest
 import scala.collection.mutable
-import upickle.default.*
+import upickle.default._
 
 case class FunctionCall(
   functionName: String,
   args: List[String], // Serialized arguments
   hash: String
-) derives ReadWriter
+)
 
 object FunctionCall {
+  implicit val rw: ReadWriter[FunctionCall] = macroRW
+
   def fromCall[T](functionName: String, args: Any*): FunctionCall = {
     val argsStr = args.map(_.toString).toList
     val hashInput = s"$functionName:${argsStr.mkString(",")}"
@@ -28,7 +30,7 @@ object FunctionCall {
 case class FunctionCallSnapshot[T](
   call: FunctionCall,
   result: T
-) derives ReadWriter
+)
 
 class FunctionSnapshotManager(testCaseRun: TestCaseRun) {
   

@@ -13,7 +13,7 @@ object BooktestMain {
     var reviewMode = false
     var batchReview = false
     var treeView = false
-    var diffMode = DiffMode.Unified
+    var diffMode: DiffMode = DiffMode.Unified
     val testClasses = scala.collection.mutable.ListBuffer[String]()
     
     var i = 0

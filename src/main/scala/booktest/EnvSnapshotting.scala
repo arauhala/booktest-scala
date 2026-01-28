@@ -1,11 +1,13 @@
 package booktest
 
 import scala.util.Properties
-import upickle.default.*
+import upickle.default._
 
-case class EnvSnapshot(variables: Map[String, String]) derives ReadWriter
+case class EnvSnapshot(variables: Map[String, String])
 
 object EnvSnapshot {
+  implicit val rw: ReadWriter[EnvSnapshot] = macroRW
+
   def fromOptionalMap(map: Map[String, Option[String]]): EnvSnapshot = {
     EnvSnapshot(map.collect { case (k, Some(v)) => k -> v })
   }

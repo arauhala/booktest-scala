@@ -3,11 +3,12 @@ package booktest
 import fansi.Color
 
 // Diff display modes
-enum DiffMode {
-  case Unified    // Traditional unified diff (default)
-  case SideBySide // Side-by-side comparison
-  case Inline     // Inline character-level changes
-  case Minimal    // Only show line numbers of differences
+sealed trait DiffMode
+object DiffMode {
+  case object Unified extends DiffMode    // Traditional unified diff (default)
+  case object SideBySide extends DiffMode // Side-by-side comparison
+  case object Inline extends DiffMode     // Inline character-level changes
+  case object Minimal extends DiffMode    // Only show line numbers of differences
 }
 
 case class TestResult(
