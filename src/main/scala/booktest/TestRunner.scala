@@ -89,11 +89,25 @@ class TestRunner(config: RunConfig = RunConfig()) {
       val endTime = System.currentTimeMillis()
       val duration = endTime - startTime
       
-      val result = SnapshotManager.compareTest(testRun, config.diffMode).copy(
-        testName = s"$suiteName/${testCase.name}",  // Store with suite prefix
-        returnValue = Some(returnValue),
-        durationMs = duration
-      )
+      val snapshotResult = SnapshotManager.compareTest(testRun, config.diffMode)
+
+      // Check if test explicitly failed via t.fail()
+      val result = if (testRun.isFailed) {
+        val failMsg = testRun.failMessage.map(m => s": $m").getOrElse("")
+        snapshotResult.copy(
+          testName = s"$suiteName/${testCase.name}",
+          passed = false,
+          diff = Some(s"Test explicitly failed$failMsg"),
+          returnValue = Some(returnValue),
+          durationMs = duration
+        )
+      } else {
+        snapshotResult.copy(
+          testName = s"$suiteName/${testCase.name}",  // Store with suite prefix
+          returnValue = Some(returnValue),
+          durationMs = duration
+        )
+      }
       testRun.writeOutput()
       
       // Write log file

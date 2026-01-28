@@ -12,6 +12,8 @@ class TestCaseRun(
   private val outputBuffer = new StringBuilder
   private val infoBuffer = new StringBuilder
   private var lineNumber = 0
+  private var _failed = false
+  private var _failMessage: Option[String] = None
   
   val outputFile: Path = outputDir / s"$testName.md"
   val snapshotFile: Path = snapshotDir / s"$testName.md"
@@ -52,7 +54,45 @@ class TestCaseRun(
     infoFeed("\n")
     this
   }
-  
+
+  /** Mark the test as failed without throwing an exception */
+  def fail(message: String = ""): TestCaseRun = {
+    _failed = true
+    _failMessage = if (message.nonEmpty) Some(message) else None
+    this
+  }
+
+  /** Check if test has been marked as failed */
+  def isFailed: Boolean = _failed
+
+  /** Get the failure message if test was marked as failed */
+  def failMessage: Option[String] = _failMessage
+
+  /** Get a File in the test output directory */
+  def file(name: String): java.io.File = {
+    val filePath = outDir / name
+    os.makeDir.all(filePath / os.up)
+    filePath.toIO
+  }
+
+  /** Execute block, print elapsed time as info line, return block result */
+  def iMsLn[T](block: => T): T = {
+    iMsLn("")(block)
+  }
+
+  /** Execute block with label, print elapsed time as info line, return block result */
+  def iMsLn[T](label: String)(block: => T): T = {
+    val start = System.currentTimeMillis()
+    val result = block
+    val elapsed = System.currentTimeMillis() - start
+    if (label.nonEmpty) {
+      iln(s"$label: ${elapsed}ms")
+    } else {
+      iln(s"${elapsed}ms")
+    }
+    result
+  }
+
   private def header(headerText: String): TestCaseRun = {
     testFeed("\n")
     testFeed(headerText)
