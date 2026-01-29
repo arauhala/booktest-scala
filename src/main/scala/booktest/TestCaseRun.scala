@@ -93,6 +93,86 @@ class TestCaseRun(
     result
   }
 
+  /** Execute block, return (elapsed_ms, result) tuple */
+  def ms[T](block: => T): (Long, T) = {
+    val start = System.currentTimeMillis()
+    val result = block
+    val elapsed = System.currentTimeMillis() - start
+    (elapsed, result)
+  }
+
+  /** Execute block n times, print us/operation as info line, return last result */
+  def iUsPerOpLn[T](n: Int, label: String = "")(block: => T): T = {
+    val start = System.nanoTime()
+    var result: T = block
+    var i = 1
+    while (i < n) {
+      result = block
+      i += 1
+    }
+    val elapsed = System.nanoTime() - start
+    val usPerOp = elapsed / 1000.0 / n
+    if (label.nonEmpty) {
+      iln(f"$label: $usPerOp%.2f us/op")
+    } else {
+      iln(f"$usPerOp%.2f us/op")
+    }
+    result
+  }
+
+  /** Execute block n times, print us/operation as test line, return last result */
+  def tUsPerOpLn[T](n: Int, label: String = "")(block: => T): T = {
+    val start = System.nanoTime()
+    var result: T = block
+    var i = 1
+    while (i < n) {
+      result = block
+      i += 1
+    }
+    val elapsed = System.nanoTime() - start
+    val usPerOp = elapsed / 1000.0 / n
+    if (label.nonEmpty) {
+      tln(f"$label: $usPerOp%.2f us/op")
+    } else {
+      tln(f"$usPerOp%.2f us/op")
+    }
+    result
+  }
+
+  /** Output a long value with unit as test line */
+  def tLongLn(value: Long, unit: String = "", max: Long = Long.MaxValue): TestCaseRun = {
+    val suffix = if (unit.nonEmpty) s" $unit" else ""
+    val warning = if (value > max) " [EXCEEDED]" else ""
+    tln(s"$value$suffix$warning")
+  }
+
+  /** Output a double value with unit as test line */
+  def tDoubleLn(value: Double, unit: String = "", max: Double = Double.MaxValue): TestCaseRun = {
+    val suffix = if (unit.nonEmpty) s" $unit" else ""
+    val warning = if (value > max) " [EXCEEDED]" else ""
+    tln(f"$value%.2f$suffix$warning")
+  }
+
+  /** Assert condition, output result as test line */
+  def assertln(condition: Boolean): TestCaseRun = {
+    if (condition) {
+      tln("OK")
+    } else {
+      tln("FAILED")
+      fail("Assertion failed")
+    }
+  }
+
+  /** Assert condition with label, output result as test line */
+  def assertln(label: String, condition: Boolean): TestCaseRun = {
+    if (condition) {
+      tln(s"$label: OK")
+    } else {
+      tln(s"$label: FAILED")
+      fail(s"Assertion failed: $label")
+    }
+  }
+
   private def header(headerText: String): TestCaseRun = {
     testFeed("\n")
     testFeed(headerText)

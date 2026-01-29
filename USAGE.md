@@ -45,7 +45,14 @@ class MyTests extends TestSuite {
 | `t.i(text)` | Info text (no newline) | No |
 | `t.fail(msg)` | Mark test as failed | N/A |
 | `t.file(name)` | Get File in output dir | N/A |
-| `t.iMsLn(label) { }` | Execute block, print timing | No |
+| `t.iMsLn(label) { }` | Execute block, print timing (ms) | No |
+| `t.ms { }` | Execute block, return (ms, result) | N/A |
+| `t.iUsPerOpLn(n, label) { }` | Time n iterations, print us/op | No |
+| `t.tUsPerOpLn(n, label) { }` | Time n iterations, print us/op | Yes |
+| `t.tLongLn(v, unit, max)` | Output long with unit | Yes |
+| `t.tDoubleLn(v, unit, max)` | Output double with unit | Yes |
+| `t.assertln(condition)` | Assert and output result | Yes |
+| `t.assertln(label, cond)` | Assert with label | Yes |
 
 ### Utility Methods
 
@@ -66,6 +73,40 @@ class UtilityTests extends TestSuite {
       db.query("SELECT * FROM users")
     }
     t.tln(s"Found ${result.size} users")
+  }
+}
+```
+
+### Performance Testing
+
+```scala
+class PerfTests extends TestSuite {
+  def testPerformance(t: TestCaseRun): Unit = {
+    t.h1("Performance Benchmarks")
+
+    // Measure raw time
+    val (ms, result) = t.ms {
+      heavyComputation()
+    }
+    t.tln(s"Completed in ${ms}ms")
+
+    // Measure us/operation (info output - not in snapshot)
+    t.iUsPerOpLn(10000, "List append") {
+      List(1, 2, 3) :+ 4
+    }
+
+    // Measure us/operation (test output - in snapshot)
+    t.tUsPerOpLn(10000, "Vector append") {
+      Vector(1, 2, 3) :+ 4
+    }
+
+    // Output with units and thresholds
+    t.tLongLn(result.size, "items")
+    t.tDoubleLn(ms / 1000.0, "seconds", max = 5.0)
+
+    // Assertions
+    t.assertln("Size check", result.size > 100)
+    t.assertln(ms < 1000)  // Simple assertion
   }
 }
 ```
