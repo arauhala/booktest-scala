@@ -14,6 +14,18 @@ class TestCaseRun(
   private var lineNumber = 0
   private var _failed = false
   private var _failMessage: Option[String] = None
+
+  // Snapshot reader state - tokenized view of existing snapshot
+  private lazy val snapshotTokens: Array[String] = {
+    if (os.exists(snapshotFile)) {
+      val content = os.read(snapshotFile)
+      // Tokenize: split on whitespace and common delimiters, keeping numbers intact
+      content.split("\\s+|(?<=[^0-9.eE+-])|(?=[^0-9.eE+-])").filter(_.nonEmpty)
+    } else {
+      Array.empty
+    }
+  }
+  private var snapshotTokenIndex = 0
   
   val outputFile: Path = outputDir / s"$testName.md"
   val snapshotFile: Path = snapshotDir / s"$testName.md"
@@ -171,6 +183,62 @@ class TestCaseRun(
       tln(s"$label: FAILED")
       fail(s"Assertion failed: $label")
     }
+  }
+
+  /** Peek at next token in snapshot, try to parse as Double */
+  def peekDouble: Option[Double] = {
+    findNextNumber.flatMap { token =>
+      try {
+        Some(token.toDouble)
+      } catch {
+        case _: NumberFormatException => None
+      }
+    }
+  }
+
+  /** Peek at next token in snapshot, try to parse as Long */
+  def peekLong: Option[Long] = {
+    findNextNumber.flatMap { token =>
+      try {
+        Some(token.toLong)
+      } catch {
+        case _: NumberFormatException => None
+      }
+    }
+  }
+
+  /** Peek at next token in snapshot as String */
+  def peekToken: Option[String] = {
+    if (snapshotTokenIndex < snapshotTokens.length) {
+      Some(snapshotTokens(snapshotTokenIndex))
+    } else {
+      None
+    }
+  }
+
+  /** Skip to next token in snapshot */
+  def skipToken(): Unit = {
+    if (snapshotTokenIndex < snapshotTokens.length) {
+      snapshotTokenIndex += 1
+    }
+  }
+
+  /** Find next numeric token in snapshot (advances index) */
+  private def findNextNumber: Option[String] = {
+    while (snapshotTokenIndex < snapshotTokens.length) {
+      val token = snapshotTokens(snapshotTokenIndex)
+      snapshotTokenIndex += 1
+      // Check if it looks like a number
+      if (token.nonEmpty && (token.head.isDigit || token.head == '-' || token.head == '.')) {
+        try {
+          token.toDouble // validate it's a number
+          return Some(token)
+        } catch {
+          case _: NumberFormatException => // continue searching
+        }
+      }
+    }
+    None
   }
 
   private def header(headerText: String): TestCaseRun = {
