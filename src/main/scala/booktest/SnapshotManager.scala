@@ -24,36 +24,36 @@ case class TestResult(
 object SnapshotManager {
   
   def compareTest(testRun: TestCaseRun, diffMode: DiffMode = DiffMode.Unified): TestResult = {
-    val output = testRun.getOutput
+    val testOutput = testRun.getTestOutput
     val snapshot = testRun.getSnapshot
-    
+
     snapshot match {
       case Some(snapshotContent) =>
-        val passed = output.trim == snapshotContent.trim
-        val diff = if (!passed) Some(generateDiff(snapshotContent, output, diffMode)) else None
-        
+        val passed = testOutput.trim == snapshotContent.trim
+        val diff = if (!passed) Some(generateDiff(snapshotContent, testOutput, diffMode)) else None
+
         TestResult(
           testName = testRun.testName,
           passed = passed,
-          output = output,
+          output = testOutput,
           snapshot = Some(snapshotContent),
           diff = diff
         )
-        
+
       case None =>
         TestResult(
           testName = testRun.testName,
           passed = false,
-          output = output,
+          output = testOutput,
           snapshot = None,
           diff = Some(s"No snapshot found for test '${testRun.testName}'")
         )
     }
   }
-  
+
   def updateSnapshot(testRun: TestCaseRun): Unit = {
     os.makeDir.all(testRun.snapshotFile / os.up)
-    os.write.over(testRun.snapshotFile, testRun.getOutput)
+    os.write.over(testRun.snapshotFile, testRun.getTestOutput)
   }
   
   def generateDiff(expected: String, actual: String, mode: DiffMode = DiffMode.Unified): String = {

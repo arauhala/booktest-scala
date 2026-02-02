@@ -10,6 +10,7 @@ class TestCaseRun(
   val outDir: Path // .out directory for test results before review
 ) {
   private val outputBuffer = new StringBuilder
+  private val testBuffer = new StringBuilder  // test-only content (no info lines)
   private val infoBuffer = new StringBuilder
   private var lineNumber = 0
   private var _failed = false
@@ -113,17 +114,13 @@ class TestCaseRun(
     (elapsed, result)
   }
 
-  /** Execute block n times, print us/operation as info line, return last result */
-  def iUsPerOpLn[T](n: Int, label: String = "")(block: => T): T = {
+  /** Execute block once, print us/operation as info line, return result.
+    * opCount is the number of operations performed within the block (for calculating us/op). */
+  def iUsPerOpLn[T](opCount: Int, label: String = "")(block: => T): T = {
     val start = System.nanoTime()
-    var result: T = block
-    var i = 1
-    while (i < n) {
-      result = block
-      i += 1
-    }
+    val result: T = block
     val elapsed = System.nanoTime() - start
-    val usPerOp = elapsed / 1000.0 / n
+    val usPerOp = elapsed / 1000.0 / opCount
     if (label.nonEmpty) {
       iln(f"$label: $usPerOp%.2f us/op")
     } else {
@@ -132,17 +129,13 @@ class TestCaseRun(
     result
   }
 
-  /** Execute block n times, print us/operation as test line, return last result */
-  def tUsPerOpLn[T](n: Int, label: String = "")(block: => T): T = {
+  /** Execute block once, print us/operation as test line, return result.
+    * opCount is the number of operations performed within the block (for calculating us/op). */
+  def tUsPerOpLn[T](opCount: Int, label: String = "")(block: => T): T = {
     val start = System.nanoTime()
-    var result: T = block
-    var i = 1
-    while (i < n) {
-      result = block
-      i += 1
-    }
+    val result: T = block
     val elapsed = System.nanoTime() - start
-    val usPerOp = elapsed / 1000.0 / n
+    val usPerOp = elapsed / 1000.0 / opCount
     if (label.nonEmpty) {
       tln(f"$label: $usPerOp%.2f us/op")
     } else {
@@ -151,18 +144,55 @@ class TestCaseRun(
     result
   }
 
-  /** Output a long value with unit as test line */
-  def tLongLn(value: Long, unit: String = "", max: Long = Long.MaxValue): TestCaseRun = {
+  /** Output a long value with unit as test line.
+    * If tolerance is set (0.0 to 1.0), the value is compared against the previous
+    * snapshot value. If within tolerance, the old value is written to keep the
+    * snapshot stable. If outside tolerance, the new value is written, causing a diff. */
+  def tLongLn(value: Long, unit: String = "", max: Long = Long.MaxValue,
+              tolerance: Double = 0.0): TestCaseRun = {
     val suffix = if (unit.nonEmpty) s" $unit" else ""
     val warning = if (value > max) " [EXCEEDED]" else ""
-    tln(s"$value$suffix$warning")
+    val outputValue = if (tolerance > 0.0) {
+      peekLong match {
+        case Some(oldValue) if isWithinTolerance(value.toDouble, oldValue.toDouble, tolerance) =>
+          oldValue  // within tolerance, keep old value stable
+        case _ =>
+          value  // outside tolerance or no previous value
+      }
+    } else {
+      value
+    }
+    tln(s"$outputValue$suffix$warning")
   }
 
-  /** Output a double value with unit as test line */
-  def tDoubleLn(value: Double, unit: String = "", max: Double = Double.MaxValue): TestCaseRun = {
+  /** Output a double value with unit as test line.
+    * If tolerance is set (0.0 to 1.0), the value is compared against the previous
+    * snapshot value. If within tolerance, the old value is written to keep the
+    * snapshot stable. If outside tolerance, the new value is written, causing a diff. */
+  def tDoubleLn(value: Double, unit: String = "", max: Double = Double.MaxValue,
+                tolerance: Double = 0.0): TestCaseRun = {
     val suffix = if (unit.nonEmpty) s" $unit" else ""
     val warning = if (value > max) " [EXCEEDED]" else ""
-    tln(f"$value%.2f$suffix$warning")
+    val outputValue = if (tolerance > 0.0) {
+      peekDouble match {
+        case Some(oldValue) if isWithinTolerance(value, oldValue, tolerance) =>
+          oldValue
+        case _ =>
+          value
+      }
+    } else {
+      value
+    }
+    tln(f"$outputValue%.2f$suffix$warning")
+  }
+
+  /** Check if value is within relative tolerance of reference */
+  private def isWithinTolerance(value: Double, reference: Double, tolerance: Double): Boolean = {
+    if (reference == 0.0) {
+      value == 0.0
+    } else {
+      math.abs(value - reference) / math.abs(reference) <= tolerance
+    }
   }
 
   /** Assert condition, output result as test line */
@@ -250,11 +280,12 @@ class TestCaseRun(
   
   private def testFeed(text: String): Unit = {
     outputBuffer.append(text)
+    testBuffer.append(text)
     if (text == "\n") {
       lineNumber += 1
     }
   }
-  
+
   private def infoFeed(text: String): Unit = {
     infoBuffer.append(text)
     outputBuffer.append(text)
@@ -262,13 +293,17 @@ class TestCaseRun(
       lineNumber += 1
     }
   }
-  
+
+  /** Get full output including both test and info content (for display/logging) */
   def getOutput: String = outputBuffer.toString
+
+  /** Get test-only output excluding info lines (for snapshot comparison) */
+  def getTestOutput: String = testBuffer.toString
   
   def writeOutput(): Unit = {
-    // Write to .out directory first (before review/acceptance)
+    // Write test-only output to .out directory (this is what becomes the snapshot)
     os.makeDir.all(outFile / os.up)
-    os.write.over(outFile, getOutput)
+    os.write.over(outFile, getTestOutput)
   }
   
   def writeReport(message: String): Unit = {
@@ -296,7 +331,7 @@ class TestCaseRun(
   
   def compareWithSnapshot(): Boolean = {
     getSnapshot match {
-      case Some(snapshot) => snapshot.trim == getOutput.trim
+      case Some(snapshot) => snapshot.trim == getTestOutput.trim
       case None => false
     }
   }
