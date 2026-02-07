@@ -35,8 +35,8 @@ cmd_publish() {
     echo "==> Setting up GPG environment..."
     export GPG_TTY=$(tty)
 
-    echo "==> Publishing signed artifacts to Sonatype..."
-    sbt publishSigned
+    echo "==> Publishing signed artifacts for all Scala versions..."
+    sbt +publishSigned
 
     echo "==> Uploading bundle to Central Portal..."
     sbt sonatypeCentralUpload
