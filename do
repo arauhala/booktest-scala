@@ -14,7 +14,9 @@ show_help() {
     echo ""
     echo "Examples:"
     echo "  ./do build"
-    echo "  ./do test ExampleTests"
+    echo "  ./do test                    # Run default group from booktest.conf"
+    echo "  ./do test examples           # Run 'examples' group from booktest.conf"
+    echo "  ./do test ExampleTests       # Run specific test suite"
     echo "  ./do publish"
 }
 
@@ -23,12 +25,20 @@ cmd_build() {
 }
 
 cmd_test() {
-    local suite="${1:-booktest.examples.ExampleTests}"
-    # Add package prefix if not already present
-    if [[ "$suite" != booktest.* ]]; then
-        suite="booktest.examples.$suite"
+    local suite="${1:-}"
+    if [[ -z "$suite" ]]; then
+        # No args - use default group from booktest.conf
+        sbt "Test/runMain booktest.BooktestMain"
+    elif [[ "$suite" != booktest.* ]] && [[ "$suite" != *"."* ]]; then
+        # No dots - might be a group name, let BooktestMain handle it
+        sbt "Test/runMain booktest.BooktestMain $suite"
+    else
+        # Full class name or needs package prefix
+        if [[ "$suite" != booktest.* ]]; then
+            suite="booktest.examples.$suite"
+        fi
+        sbt "Test/runMain booktest.BooktestMain $suite"
     fi
-    sbt "Test/runMain booktest.BooktestMain -v $suite"
 }
 
 cmd_publish() {

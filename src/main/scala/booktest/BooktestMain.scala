@@ -1,7 +1,7 @@
 package booktest
 
 object BooktestMain {
-  
+
   def main(args: Array[String]): Unit = {
     var verbose = false
     var interactive = false
@@ -14,6 +14,12 @@ object BooktestMain {
     var batchReview = false
     var treeView = false
     var diffMode: DiffMode = DiffMode.Unified
+    var summaryMode = true // Python-style: diffs at end (default)
+    var recaptureAll = false  // -S: force regenerate all snapshots
+    var updateSnapshots = false  // -s: auto-accept snapshot changes
+    var threads = 1  // -t N: number of threads for parallel execution
+    var garbageMode = false  // --garbage: list orphan files
+    var cleanMode = false  // --clean: remove orphan files and temp directories
     val testClasses = scala.collection.mutable.ListBuffer[String]()
     
     var i = 0
@@ -26,6 +32,33 @@ object BooktestMain {
         case "-w" | "--review" => reviewMode = true
         case "--batch-review" => batchReview = true
         case "--tree" => treeView = true
+        case "--inline" => summaryMode = false  // Show diffs inline (old behavior)
+        case "-S" | "--recapture" => recaptureAll = true  // Force regenerate all snapshots
+        case "-s" | "--update" => updateSnapshots = true  // Auto-accept changes
+        case "--garbage" => garbageMode = true  // List orphan files in books/
+        case "--clean" => cleanMode = true  // Remove orphan files and .tmp directories
+        case "-p" =>
+          i += 1
+          if (i < args.length) {
+            try {
+              threads = args(i).toInt
+              if (threads < 1) threads = 1
+            } catch {
+              case _: NumberFormatException =>
+                println(s"Invalid thread count: ${args(i)}, using 1")
+                threads = 1
+            }
+          }
+        case arg if arg.startsWith("-p") && arg.length > 2 && arg(2).isDigit =>
+          // Handle -p4, -p8, etc.
+          try {
+            threads = arg.substring(2).toInt
+            if (threads < 1) threads = 1
+          } catch {
+            case _: NumberFormatException =>
+              println(s"Invalid thread count in: $arg, using 1")
+              threads = 1
+          }
         case "--diff-style" =>
           i += 1
           if (i < args.length) {
@@ -60,6 +93,15 @@ object BooktestMain {
       i += 1
     }
     
+    // Load booktest.conf if present
+    val booktestConfig = BooktestConfig.load().getOrElse(BooktestConfig.empty)
+
+    // Use books-path from config if not overridden
+    if (outputDir == "books" && booktestConfig.booksPath != "books") {
+      outputDir = booktestConfig.booksPath
+      snapshotDir = booktestConfig.booksPath
+    }
+
     val config = RunConfig(
       outputDir = os.pwd / outputDir,
       snapshotDir = os.pwd / snapshotDir,
@@ -67,33 +109,64 @@ object BooktestMain {
       interactive = interactive,
       testFilter = testFilter,
       diffMode = diffMode,
-      batchReview = batchReview
+      batchReview = batchReview,
+      summaryMode = summaryMode,
+      recaptureAll = recaptureAll,
+      updateSnapshots = updateSnapshots,
+      threads = threads,
+      booktestConfig = booktestConfig
     )
-    
-    if (testClasses.isEmpty && !listTests) {
-      println("No test classes specified. Use --help for usage information.")
-      sys.exit(1)
-    }
-    
-    val suites = if (testClasses.isEmpty && listTests) {
-      // Auto-discover all test suites when listing without arguments
-      discoverAllTestSuites()
-    } else {
-      testClasses.toList.flatMap { className =>
-        try {
-          val clazz = Class.forName(className)
-          val constructor = clazz.getDeclaredConstructor()
-          val instance = constructor.newInstance().asInstanceOf[TestSuite]
-          Some(instance)
-        } catch {
-          case e: ClassNotFoundException =>
-            println(s"Error: Test class '$className' not found")
-            None
-          case e: Exception =>
-            println(s"Error creating instance of '$className': ${e.getMessage}")
-            None
-        }
+
+    // Resolve test suites - paths are relative to root namespace
+    val suites: List[TestSuite] = if (testClasses.isEmpty) {
+      // No args: run default with exclude patterns applied
+      booktestConfig.defaultTests match {
+        case Some(defaultPath) =>
+          val fullPath = booktestConfig.resolvePath(defaultPath)
+          val discovered = discoverTestSuites(fullPath)
+          // Apply exclude patterns for default runs
+          discovered.filterNot(s => booktestConfig.isExcluded(s.fullClassName))
+        case None =>
+          println("No tests specified. Configure 'default' in booktest.conf")
+          println("Or specify test path as argument (e.g., 'booktest examples')")
+          sys.exit(1)
       }
+    } else {
+      // Has arguments - resolve each one
+      testClasses.flatMap { rawArg =>
+        // Normalize: convert slash format to dot format (examples/ImageTest -> examples.ImageTest)
+        val arg = rawArg.replace('/', '.')
+
+        // Check if it's a group name first
+        booktestConfig.getGroup(arg) match {
+          case Some(packages) =>
+            // It's a group - discover all packages, apply exclude
+            val discovered = packages.flatMap(discoverTestSuites)
+            discovered.filterNot(s => booktestConfig.isExcluded(s.fullClassName))
+          case None =>
+            // Not a group - resolve as path relative to root
+            val fullPath = if (arg.startsWith(booktestConfig.root.getOrElse(""))) {
+              // Already a full path
+              arg
+            } else {
+              // Relative path - prepend root
+              booktestConfig.resolvePath(arg)
+            }
+            val discovered = discoverTestSuites(fullPath)
+            if (discovered.nonEmpty) {
+              // Don't apply exclude for explicit class names
+              if (discovered.length == 1) {
+                discovered
+              } else {
+                // Multiple matches (package) - apply exclude
+                discovered.filterNot(s => booktestConfig.isExcluded(s.fullClassName))
+              }
+            } else {
+              // Try as explicit class name - no exclude
+              loadTestSuite(fullPath).toList
+            }
+        }
+      }.toList
     }
     
     if (suites.isEmpty) {
@@ -144,7 +217,51 @@ object BooktestMain {
       val exitCode = runner.reviewResults(suites)
       sys.exit(exitCode)
     }
-    
+
+    if (garbageMode || cleanMode) {
+      // Garbage/clean mode - find orphan files in books/ directory
+      val garbageFiles = findGarbageFiles(config.snapshotDir, suites, booktestConfig)
+      val tmpDirs = findTmpDirectories(config.outputDir / ".out")
+
+      if (garbageMode) {
+        // Just print the garbage files
+        if (garbageFiles.nonEmpty) {
+          println("Orphan files in books/ directory:")
+          garbageFiles.foreach(f => println(s"  $f"))
+        }
+        if (tmpDirs.nonEmpty) {
+          println("Temporary directories in .out/:")
+          tmpDirs.foreach(d => println(s"  $d"))
+        }
+        if (garbageFiles.isEmpty && tmpDirs.isEmpty) {
+          println("No garbage found.")
+        }
+      } else {
+        // Clean mode - remove garbage files and tmp directories
+        var removed = 0
+        garbageFiles.foreach { file =>
+          try {
+            os.remove(file)
+            println(s"Removed: $file")
+            removed += 1
+          } catch {
+            case e: Exception => println(s"Failed to remove $file: ${e.getMessage}")
+          }
+        }
+        tmpDirs.foreach { dir =>
+          try {
+            os.remove.all(dir)
+            println(s"Removed: $dir")
+            removed += 1
+          } catch {
+            case e: Exception => println(s"Failed to remove $dir: ${e.getMessage}")
+          }
+        }
+        println(s"Removed $removed items.")
+      }
+      return
+    }
+
     val runner = new TestRunner(config)
     val result = runner.runMultipleSuites(suites)
     
@@ -180,30 +297,33 @@ object BooktestMain {
       }
       
       availableClasses.foreach { className =>
-        // Apply filter to class name
+        // Use slash format with root stripped (consistent with test output)
+        val suitePath = config.booktestConfig.classNameToPath(className)
+
+        // Apply filter
         val classMatches = config.testFilter match {
-          case Some(pattern) => className.contains(pattern)
+          case Some(pattern) => suitePath.contains(pattern) || className.contains(pattern)
           case None => true
         }
-        
+
         if (classMatches) {
-          println(s"  $className")
+          println(s"  $suitePath")
         }
-        
+
         // Also show individual tests in this class
         try {
           val clazz = Class.forName(className)
           val constructor = clazz.getDeclaredConstructor()
           val instance = constructor.newInstance().asInstanceOf[TestSuite]
           val testCases = instance.testCases
-          
+
           val filteredTests = config.testFilter match {
-            case Some(pattern) => testCases.filter(tc => tc.name.contains(pattern) || className.contains(pattern))
+            case Some(pattern) => testCases.filter(tc => tc.name.contains(pattern) || suitePath.contains(pattern))
             case None => testCases
           }
-          
+
           filteredTests.foreach { testCase =>
-            println(s"  $className/${testCase.name}")
+            println(s"  $suitePath/${testCase.name}")
           }
         } catch {
           case e: Exception =>
@@ -213,14 +333,15 @@ object BooktestMain {
     } else {
       // Specific class mode - show individual test methods for the specified classes
       suites.foreach { suite =>
-        val suiteName = suite.suiteName
+        // Use slash format with root stripped
+        val suitePath = config.booktestConfig.classNameToPath(suite.fullClassName)
         val testCases = suite.testCases
         val filteredTests = config.testFilter match {
           case Some(pattern) => testCases.filter(_.name.contains(pattern))
           case None => testCases
         }
         filteredTests.foreach { testCase =>
-          println(s"  $suiteName/${testCase.name}")
+          println(s"  $suitePath/${testCase.name}")
         }
       }
     }
@@ -228,30 +349,29 @@ object BooktestMain {
   
   private def displayTestsAsTree(suites: List[TestSuite], config: RunConfig): Unit = {
     import fansi._
-    
-    val cacheDir = config.outputDir / ".cache"
-    val cache = new DependencyCache(cacheDir)
-    
+
     suites.foreach { suite =>
       val suiteName = suite.suiteName
+      val suitePath = config.booktestConfig.classNameToPath(suite.fullClassName)
       val testCases = suite.testCases
       val filteredTests = config.testFilter match {
         case Some(pattern) => testCases.filter(_.name.contains(pattern))
         case None => testCases
       }
-      
+
       if (filteredTests.nonEmpty) {
         println(s"${Color.Blue("📂")} ${fansi.Bold.On(suiteName)}")
-        
+
         // Build dependency graph for ordering
         val orderedTests = topologicalSort(filteredTests)
-        
+
         orderedTests.zipWithIndex.foreach { case (testCase, index) =>
           val isLast = index == orderedTests.length - 1
           val prefix = if (isLast) "└── " else "├── "
-          
-          // Get cache status
-          val cacheStatus = if (cache.contains(testCase.name)) {
+
+          // Get cache status by checking bin file
+          val binFile = config.outputDir / ".out" / os.RelPath(suitePath) / s"${testCase.name}.bin"
+          val cacheStatus = if (os.exists(binFile)) {
             Color.Green("✅")
           } else {
             Color.Yellow("⏳")
@@ -273,7 +393,10 @@ object BooktestMain {
         
         // Summary
         val totalTests = filteredTests.length
-        val cachedTests = filteredTests.count(tc => cache.contains(tc.name))
+        val cachedTests = filteredTests.count { tc =>
+          val binFile = config.outputDir / ".out" / os.RelPath(suitePath) / s"${tc.name}.bin"
+          os.exists(binFile)
+        }
         val dependencyChains = countDependencyChains(filteredTests)
         
         println()
@@ -341,7 +464,7 @@ object BooktestMain {
 
   def printHelp(): Unit = {
     println("Booktest - Review-driven testing for Scala")
-    println("Usage: booktest [options] <test-class-names>")
+    println("Usage: booktest [options] [group-name | test-class-names...]")
     println()
     println("Options:")
     println("  -v, --verbose       Verbose output")
@@ -351,52 +474,237 @@ object BooktestMain {
     println("  -w, --review        Review previous test results")
     println("  --batch-review      Review multiple failed tests in sequence")
     println("  --tree              Show tests in hierarchical tree format (with -l)")
+    println("  --inline            Show diffs inline (default: show at end)")
+    println("  -s, --update        Auto-accept snapshot changes (update mode)")
+    println("  -S, --recapture     Force regenerate all snapshots")
+    println("  -pN, -p N           Run tests in parallel using N threads (e.g., -p4)")
     println("  --diff-style STYLE  Diff display style: unified, side-by-side, inline, minimal")
     println("  --output-dir DIR    Output directory for test results (default: books)")
     println("  --snapshot-dir DIR  Snapshot directory (default: books)")
     println("  -t, --test-filter   Filter tests by name pattern")
+    println("  --garbage           List orphan files in books/ and temp directories")
+    println("  --clean             Remove orphan files and temp directories")
     println("  -h, --help          Show this help message")
     println()
+    println("Configuration (booktest.conf):")
+    println("  test-root = booktest              # Package prefix to strip from paths")
+    println("  test-packages = booktest.examples # Packages to scan for tests")
+    println("  default = booktest.examples       # Default tests to run")
+    println("  books-path = books                # Where to store snapshots")
+    println()
     println("Examples:")
-    println("  booktest booktest.examples.ExampleTests")
-    println("  booktest -v booktest.examples.ExampleTests")
-    println("  booktest -l                                  # List all test classes and individual tests")
-    println("  booktest -l booktest.examples.DependencyTests")
-    println("  booktest -l --tree booktest.examples.MethodRefTests")
-    println("  booktest -t Data booktest.examples.DependencyTests")
-    println("  booktest -i booktest.examples.FailingTest")
-    println("  booktest --batch-review booktest.examples.FailingTest")
-    println("  booktest --diff-style side-by-side -v booktest.examples.FailingTest")
+    println("  booktest                             # Run tests from 'default' package")
+    println("  booktest booktest.examples           # Run all tests in package")
+    println("  booktest booktest.examples.ImageTest # Run specific test suite")
+    println("  booktest -v booktest.examples        # Verbose output")
+    println("  booktest -l                          # List all discovered tests")
+    println("  booktest -t Data                     # Filter tests by pattern")
+    println("  booktest -i booktest.examples        # Interactive mode")
+    println("  booktest --garbage                   # List orphan files")
+    println("  booktest --clean                     # Remove orphan files")
   }
   
-  private def discoverAllTestSuites(): List[TestSuite] = {
-    // Known test suite classes - in a full implementation, this could use reflection
-    // to scan the classpath, but for now we'll use a hardcoded list of known examples
-    val knownTestSuites = List(
+  /** Discover TestSuite classes in a package by scanning the classpath.
+    * Uses the compiled class files in target/ to find all classes.
+    */
+  private def discoverTestSuites(packageName: String): List[TestSuite] = {
+    val classLoader = Thread.currentThread().getContextClassLoader
+    val packagePath = packageName.replace('.', '/')
+
+    // Find all class files in the package
+    val classNames = scala.collection.mutable.ListBuffer[String]()
+
+    // Try to find classes from the classpath
+    try {
+      val resources = classLoader.getResources(packagePath)
+      while (resources.hasMoreElements) {
+        val resource = resources.nextElement()
+        val path = resource.getPath
+        if (path.contains("target/scala")) {
+          // Scan the directory for .class files
+          val dir = new java.io.File(java.net.URLDecoder.decode(path, "UTF-8"))
+          if (dir.exists() && dir.isDirectory) {
+            scanClassDirectory(dir, packageName, classNames)
+          }
+        }
+      }
+    } catch {
+      case _: Exception => // Ignore errors during discovery
+    }
+
+    // If no classes found via classpath, try hardcoded fallback for known packages
+    if (classNames.isEmpty && packageName.startsWith("booktest.examples")) {
+      classNames ++= getKnownTestClasses(packageName)
+    }
+
+    // Instantiate discovered classes that extend TestSuite
+    classNames.flatMap(loadTestSuite).toList
+  }
+
+  /** Recursively scan a directory for class files */
+  private def scanClassDirectory(dir: java.io.File, packageName: String, classNames: scala.collection.mutable.ListBuffer[String]): Unit = {
+    dir.listFiles().foreach { file =>
+      if (file.isDirectory) {
+        scanClassDirectory(file, s"$packageName.${file.getName}", classNames)
+      } else if (file.getName.endsWith(".class") && !file.getName.contains("$")) {
+        val className = s"$packageName.${file.getName.dropRight(6)}"
+        classNames += className
+      }
+    }
+  }
+
+  /** Get known test classes for common packages (fallback when classpath scanning fails) */
+  private def getKnownTestClasses(packageName: String): List[String] = {
+    val allKnown = List(
       "booktest.examples.ExampleTests",
-      "booktest.examples.DependencyTests", 
+      "booktest.examples.DependencyTests",
       "booktest.examples.MethodRefTests",
       "booktest.examples.FailingTest",
       "booktest.examples.MultiFail",
+      "booktest.examples.NewFeaturesTest",
+      "booktest.examples.InfoMethodsTest",
+      "booktest.examples.MetricsTest",
+      "booktest.examples.SnapshotCacheTest",
+      "booktest.examples.AsyncTest",
+      "booktest.examples.SetupTeardownTest",
+      "booktest.examples.DirectionConstraintsTest",
+      "booktest.examples.MarkersTest",
+      "booktest.examples.ImageTest",
+      "booktest.examples.TmpDirTest",
       "booktest.examples.EnvSnapshotTests",
       "booktest.examples.HttpSnapshotTests",
       "booktest.examples.FunctionSnapshotTests"
     )
-    
-    knownTestSuites.flatMap { className =>
-      try {
-        val clazz = Class.forName(className)
+    allKnown.filter(_.startsWith(packageName))
+  }
+
+  /** Load a single TestSuite class by name */
+  private def loadTestSuite(className: String): Option[TestSuite] = {
+    try {
+      val clazz = Class.forName(className)
+      if (classOf[TestSuite].isAssignableFrom(clazz) && !clazz.isInterface) {
         val constructor = clazz.getDeclaredConstructor()
         val instance = constructor.newInstance().asInstanceOf[TestSuite]
         Some(instance)
-      } catch {
-        case _: ClassNotFoundException =>
-          // Class doesn't exist, skip it
-          None
-        case e: Exception =>
+      } else {
+        None
+      }
+    } catch {
+      case _: ClassNotFoundException => None
+      case _: NoSuchMethodException => None  // No default constructor
+      case e: Exception =>
+        // Only warn for actual instantiation errors, not for non-TestSuite classes
+        if (classOf[TestSuite].isAssignableFrom(Class.forName(className))) {
           println(s"Warning: Could not instantiate $className: ${e.getMessage}")
-          None
+        }
+        None
+    }
+  }
+
+  /** Find orphan files in books/ directory that don't correspond to known tests.
+    * Protects:
+    * - <suite>/<test>.md files
+    * - <suite>/<test>/ asset directories
+    * - <suite>/<test>.snapshots.json files
+    * - index.md (if present)
+    */
+  private def findGarbageFiles(booksDir: os.Path, suites: List[TestSuite], config: BooktestConfig): List[os.Path] = {
+    if (!os.exists(booksDir)) return List.empty
+
+    // Build set of protected paths
+    val protectedPaths = scala.collection.mutable.Set[os.Path]()
+
+    suites.foreach { suite =>
+      val suitePath = config.classNameToPath(suite.fullClassName)
+      val suiteDir = booksDir / os.RelPath(suitePath)
+
+      // Protect the suite directory itself
+      protectedPaths += suiteDir
+
+      suite.testCases.foreach { testCase =>
+        // Protect: <test>.md, <test>/, <test>.snapshots.json
+        protectedPaths += suiteDir / s"${testCase.name}.md"
+        protectedPaths += suiteDir / testCase.name
+        protectedPaths += suiteDir / s"${testCase.name}.snapshots.json"
       }
     }
+
+    // Also protect index.md if present
+    protectedPaths += booksDir / "index.md"
+
+    // Walk books/ directory (excluding .out/)
+    val garbageFiles = scala.collection.mutable.ListBuffer[os.Path]()
+
+    def walkDir(dir: os.Path): Unit = {
+      if (!os.exists(dir)) return
+
+      os.list(dir).foreach { path =>
+        val name = path.last
+        // Skip .out directory
+        if (name == ".out") {
+          // Skip
+        } else if (os.isDir(path)) {
+          // Check if this directory is protected
+          if (!isProtected(path, protectedPaths)) {
+            // Check if any files inside are protected
+            val hasProtectedContent = os.walk(path).exists(p => isProtected(p, protectedPaths))
+            if (!hasProtectedContent) {
+              garbageFiles += path
+            } else {
+              // Recurse into the directory
+              walkDir(path)
+            }
+          } else {
+            // Directory is protected (it's a test assets dir), but check for orphan files inside
+            // Actually, don't check inside protected asset directories
+          }
+        } else {
+          // It's a file
+          if (!isProtected(path, protectedPaths)) {
+            garbageFiles += path
+          }
+        }
+      }
+    }
+
+    walkDir(booksDir)
+    garbageFiles.toList
+  }
+
+  /** Check if a path is protected (exact match or parent of protected path) */
+  private def isProtected(path: os.Path, protectedPaths: scala.collection.mutable.Set[os.Path]): Boolean = {
+    protectedPaths.contains(path) || protectedPaths.exists(p => p.startsWith(path))
+  }
+
+  /** Find all test tmp directories in .out/ that can be cleaned.
+    * Tmp directories are identified as directories that have corresponding test files
+    * (e.g., testName/ is a tmp dir if testName.md or testName.bin exists).
+    */
+  private def findTmpDirectories(outDir: os.Path): List[os.Path] = {
+    if (!os.exists(outDir)) return List.empty
+
+    val tmpDirs = scala.collection.mutable.ListBuffer[os.Path]()
+
+    def walkDir(dir: os.Path): Unit = {
+      if (!os.exists(dir)) return
+
+      os.list(dir).foreach { path =>
+        if (os.isDir(path)) {
+          val name = path.last
+          // Check if this is a test tmp directory (has corresponding .md or .bin file)
+          val mdFile = dir / s"$name.md"
+          val binFile = dir / s"$name.bin"
+          if (os.exists(mdFile) || os.exists(binFile)) {
+            tmpDirs += path
+          } else {
+            // It's a suite directory, recurse
+            walkDir(path)
+          }
+        }
+      }
+    }
+
+    walkDir(outDir)
+    tmpDirs.toList
   }
 }

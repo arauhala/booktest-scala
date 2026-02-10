@@ -18,7 +18,8 @@ case class TestResult(
   snapshot: Option[String] = None,
   diff: Option[String] = None,
   returnValue: Option[Any] = None,
-  durationMs: Long = 0
+  durationMs: Long = 0,
+  testRun: Option[TestCaseRun] = None  // For parallel execution to access test output
 )
 
 object SnapshotManager {
@@ -52,8 +53,28 @@ object SnapshotManager {
   }
 
   def updateSnapshot(testRun: TestCaseRun): Unit = {
+    // Copy main test output (markdown)
     os.makeDir.all(testRun.snapshotFile / os.up)
     os.write.over(testRun.snapshotFile, testRun.getTestOutput)
+
+    // Copy test assets directory if it exists (images, generated files)
+    // Python style: books/<suite>/<test>/ for assets
+    val assetsDir = testRun.assetsDir
+    val snapshotAssetsDir = testRun.snapshotDir / testRun.testName
+    if (os.exists(assetsDir) && os.list(assetsDir).nonEmpty) {
+      os.makeDir.all(snapshotAssetsDir)
+      os.list(assetsDir).foreach { file =>
+        val name = file.last
+        // Copy files (hashed images have no extension, but copy everything)
+        os.copy.over(file, snapshotAssetsDir / name)
+      }
+    }
+
+    // Copy snapshots.json if it exists (HTTP/function snapshots)
+    if (os.exists(testRun.snapshotsFile)) {
+      val snapshotJsonDest = testRun.snapshotDir / s"${testRun.testName}.snapshots.json"
+      os.copy.over(testRun.snapshotsFile, snapshotJsonDest)
+    }
   }
   
   def generateDiff(expected: String, actual: String, mode: DiffMode = DiffMode.Unified): String = {
