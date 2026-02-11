@@ -2,6 +2,7 @@ package booktest
 
 import os.Path
 import fansi.Color
+import fansi.Color.{LightRed, LightGreen, LightYellow, LightCyan, LightBlue}
 
 case class RunConfig(
   outputDir: Path = os.pwd / "books",
@@ -14,7 +15,8 @@ case class RunConfig(
   summaryMode: Boolean = true,  // Python-style: show diffs at end (default)
   recaptureAll: Boolean = false,  // -S: force regenerate all snapshots
   updateSnapshots: Boolean = false,  // -s: auto-accept snapshot changes
-  threads: Int = 1,  // -j N: number of threads for parallel execution
+  continueMode: Boolean = false,  // -c: continue from last run, skip successful tests
+  threads: Int = 1,  // -p N: number of threads for parallel execution
   booktestConfig: BooktestConfig = BooktestConfig.empty  // test-root and groups config
 ) {
   /** Get the test path for a suite, applying test-root stripping */
@@ -48,50 +50,12 @@ class TestRunner(config: RunConfig = RunConfig()) {
   /** Get the resource manager for tests that need ports/resources */
   def resources: ResourceManager = resourceManager
   
+  /** Run a single suite (without continue mode filtering).
+    * For continue mode support, use runMultipleSuites instead.
+    */
   def runSuite(suite: TestSuite): RunResult = {
-    val suiteName = suite.suiteName
-    val fullClassName = suite.fullClassName  // For path computation with test-root
-    val testCases = suite.testCases
-
-    val filteredTests = config.testFilter match {
-      case Some(pattern) => testCases.filter(_.name.contains(pattern))
-      case None => testCases
-    }
-
-    // Call beforeAll hook
-    try {
-      suite.getBeforeAll()
-    } catch {
-      case e: Exception =>
-        println(s"Warning: beforeAll failed for $suiteName: ${e.getMessage}")
-    }
-
-    val results = try {
-      if (config.threads > 1) {
-        runTestsParallel(filteredTests, fullClassName, suite)
-      } else {
-        val sortedTests = resolveDependencyOrder(filteredTests)
-        sortedTests.map(runTestCase(_, fullClassName, suite))
-      }
-    } finally {
-      // Call afterAll hook
-      try {
-        suite.getAfterAll()
-      } catch {
-        case e: Exception =>
-          println(s"Warning: afterAll failed for $suiteName: ${e.getMessage}")
-      }
-    }
-
-    val passedCount = results.count(_.passed)
-    val failedCount = results.count(!_.passed)
-
-    RunResult(
-      totalTests = results.length,
-      passedTests = passedCount,
-      failedTests = failedCount,
-      results = results
-    )
+    // Delegate to runSuiteWithFilter with empty todoSet (run all tests)
+    runSuiteWithFilter(suite, Set.empty)
   }
   
   def runTestCase(testCase: TestCase, suiteName: String, suite: TestSuite = null): TestResult = {
@@ -200,21 +164,21 @@ class TestRunner(config: RunConfig = RunConfig()) {
         if (config.verbose) {
           // Print test output in verbose mode
           printVerboseOutput(testRun)
-          println(s"$fullTestName ${Color.Yellow("UPDATED")} ${duration} ms.")
+          println(s"$fullTestName ${LightYellow("UPDATED")} ${duration} ms.")
           println()
         } else if (config.summaryMode) {
-          println(s"${Color.Yellow("UPDATED")} ${duration} ms")
+          println(s"${LightYellow("UPDATED")} ${duration} ms")
         } else {
-          println(s"${Color.Yellow("snapshot updated")} ${duration} ms")
+          println(s"${LightYellow("snapshot updated")} ${duration} ms")
         }
         true
       } else if (config.verbose) {
         // Verbose mode: show test output content like Python
         printVerboseOutput(testRun)
         if (result.passed) {
-          println(s"$fullTestName ${Color.Green("ok")} ${duration} ms.")
+          println(s"$fullTestName ${LightGreen("ok")} ${duration} ms.")
         } else {
-          println(s"$fullTestName ${Color.Red("DIFF")} ${duration} ms.")
+          println(s"$fullTestName ${LightRed("DIFF")} ${duration} ms.")
           // Show diff inline in verbose mode
           result.diff.foreach { diff =>
             println()
@@ -226,9 +190,9 @@ class TestRunner(config: RunConfig = RunConfig()) {
       } else if (config.summaryMode) {
         // Python-style: show status inline, collect diffs for end
         if (result.passed) {
-          println(s"${Color.Green("ok")} ${duration} ms")
+          println(s"${LightGreen("ok")} ${duration} ms")
         } else {
-          println(s"${Color.Red("DIFF")} ${duration} ms")
+          println(s"${LightRed("DIFF")} ${duration} ms")
         }
         false
       } else if (!result.passed) {
@@ -266,9 +230,9 @@ class TestRunner(config: RunConfig = RunConfig()) {
             }
             println()
           }
-          println(s"$suiteName/${testCase.name} ${Color.Red("ERROR")} ${duration} ms.")
+          println(s"$suiteName/${testCase.name} ${LightRed("FAIL")} ${duration} ms.")
           println()
-          println(Color.Red(errorMessage))
+          println(LightRed(errorMessage))
           e.printStackTrace()
           println()
         } else {
@@ -290,20 +254,62 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
   def runMultipleSuites(suites: List[TestSuite]): RunResult = {
     val startTime = System.currentTimeMillis()
-    
+
     // Print header
     println()
     println("# test results:")
     println()
-    
-    val allResults = suites.map(runSuite)
-    
+
+    // Load previous case reports for continue mode
+    val outDir = config.outputDir / ".out"
+    val oldReports = CaseReports.fromDir(outDir)
+
+    // Build list of all selected test names (for continue mode calculation)
+    val allSelectedTestNames = suites.flatMap { suite =>
+      val fullClassName = suite.fullClassName
+      val suitePath = config.getSuitePath(fullClassName)
+      val testCases = suite.testCases
+      val filteredTests = config.testFilter match {
+        case Some(pattern) => testCases.filter(_.name.contains(pattern))
+        case None => testCases
+      }
+      filteredTests.map(tc => s"$suitePath/${tc.name}")
+    }
+
+    // Apply continue mode logic
+    val (doneCaseReports, todoTestNames) = oldReports.casesToDoneAndTodo(allSelectedTestNames, config.continueMode)
+    val todoSet = todoTestNames.toSet
+
+    // Track results from skipped tests (continue mode)
+    val skippedResults = if (config.continueMode && doneCaseReports.nonEmpty) {
+      println(LightCyan(s"Continue mode: skipping ${doneCaseReports.length} successful tests"))
+      println()
+      doneCaseReports.map { report =>
+        TestResult(
+          testName = report.testName,
+          passed = true,
+          output = "",
+          durationMs = report.durationMs
+        )
+      }
+    } else {
+      List.empty
+    }
+
+    // Run suites (filtering out tests that were skipped in continue mode)
+    val allResults = suites.map { suite =>
+      runSuiteWithFilter(suite, todoSet)
+    }
+
     val endTime = System.currentTimeMillis()
     val totalDuration = endTime - startTime
-    
-    val totalTests = allResults.map(_.totalTests).sum
-    val totalFailed = allResults.map(_.failedTests).sum
-    val allTestResults = allResults.flatMap(_.results)
+
+    // Combine skipped results with new results
+    val newTestResults = allResults.flatMap(_.results)
+    val allTestResults = skippedResults ++ newTestResults
+
+    val totalTests = allTestResults.length
+    val totalFailed = allTestResults.count(!_.passed)
     
     // Handle batch review mode
     val finalResults = if (config.batchReview && totalFailed > 0) {
@@ -356,12 +362,12 @@ class TestRunner(config: RunConfig = RunConfig()) {
     if (failedResults.nonEmpty) {
       println()
       println("=" * 60)
-      println(Color.Red(s"# ${failedResults.length} test(s) with differences:"))
+      println(LightRed(s"# ${failedResults.length} test(s) with differences:"))
       println("=" * 60)
 
       failedResults.foreach { result =>
         println()
-        println(Color.Yellow(s"## ${result.testName}"))
+        println(LightYellow(s"## ${result.testName}"))
         println("-" * 40)
         result.diff.foreach { diff =>
           println(diff)
@@ -380,10 +386,92 @@ class TestRunner(config: RunConfig = RunConfig()) {
       val fullTestName = result.testName
       CaseReport(fullTestName, status, result.durationMs)
     }
-    
+
     val reports = new CaseReports(caseReports)
-    val casesFile = config.outputDir / ".out" / "cases.txt"
-    reports.writeToFile(casesFile)
+    val outDir = config.outputDir / ".out"
+    os.makeDir.all(outDir)
+    // Write both formats for compatibility
+    reports.writeToNdjsonFile(outDir / "cases.ndjson")
+    reports.writeToFile(outDir / "cases.txt")
+  }
+
+  /** Run a suite, optionally filtering to only run tests in todoSet.
+    *
+    * Design: Test selection depends ONLY on:
+    *   - config.testFilter (name pattern filtering)
+    *   - config.continueMode (whether to skip passed tests)
+    *   - todoSet (which tests need to run in continue mode)
+    *
+    * Reporting options like config.verbose do NOT affect test selection.
+    */
+  private def runSuiteWithFilter(suite: TestSuite, todoSet: Set[String]): RunResult = {
+    val suiteName = suite.suiteName
+    val fullClassName = suite.fullClassName
+    val suitePath = config.getSuitePath(fullClassName)
+    val testCases = suite.testCases
+
+    // Step 1: Apply name pattern filter
+    val filteredTests = config.testFilter match {
+      case Some(pattern) => testCases.filter(_.name.contains(pattern))
+      case None => testCases
+    }
+
+    // Step 2: Apply continue mode filter (if enabled)
+    val testsToRun = if (config.continueMode) {
+      // Continue mode: only run tests that are in the todoSet
+      filteredTests.filter { tc =>
+        val fullTestName = s"$suitePath/${tc.name}"
+        todoSet.contains(fullTestName)
+      }
+    } else {
+      // Normal mode: run all filtered tests
+      filteredTests
+    }
+
+    if (testsToRun.isEmpty) {
+      // All tests were skipped
+      return RunResult(
+        totalTests = 0,
+        passedTests = 0,
+        failedTests = 0,
+        results = List.empty
+      )
+    }
+
+    // Call beforeAll hook
+    try {
+      suite.getBeforeAll()
+    } catch {
+      case e: Exception =>
+        println(s"Warning: beforeAll failed for $suiteName: ${e.getMessage}")
+    }
+
+    val results = try {
+      if (config.threads > 1) {
+        runTestsParallel(testsToRun, fullClassName, suite)
+      } else {
+        val sortedTests = resolveDependencyOrder(testsToRun)
+        sortedTests.map(runTestCase(_, fullClassName, suite))
+      }
+    } finally {
+      // Call afterAll hook
+      try {
+        suite.getAfterAll()
+      } catch {
+        case e: Exception =>
+          println(s"Warning: afterAll failed for $suiteName: ${e.getMessage}")
+      }
+    }
+
+    val passedCount = results.count(_.passed)
+    val failedCount = results.count(!_.passed)
+
+    RunResult(
+      totalTests = results.length,
+      passedTests = passedCount,
+      failedTests = failedCount,
+      results = results
+    )
   }
   
   def reviewResults(suites: List[TestSuite]): Int = {
@@ -579,18 +667,18 @@ class TestRunner(config: RunConfig = RunConfig()) {
                 updateSnapshotForResult(result)
                 if (config.verbose) {
                   printVerboseResultOutput(result)
-                  println(s"${result.testName} ${Color.Yellow("UPDATED")} ${result.durationMs} ms.")
+                  println(s"${result.testName} ${LightYellow("UPDATED")} ${result.durationMs} ms.")
                   println()
                 } else {
-                  println(s"  ${result.testName}..${Color.Yellow("UPDATED")} ${result.durationMs} ms")
+                  println(s"  ${result.testName}..${LightYellow("UPDATED")} ${result.durationMs} ms")
                 }
                 result.copy(passed = true)
               } else if (config.verbose) {
                 printVerboseResultOutput(result)
                 if (result.passed) {
-                  println(s"${result.testName} ${Color.Green("ok")} ${result.durationMs} ms.")
+                  println(s"${result.testName} ${LightGreen("ok")} ${result.durationMs} ms.")
                 } else {
-                  println(s"${result.testName} ${Color.Red("DIFF")} ${result.durationMs} ms.")
+                  println(s"${result.testName} ${LightRed("DIFF")} ${result.durationMs} ms.")
                   result.diff.foreach { diff =>
                     println()
                     println(diff)
@@ -599,10 +687,10 @@ class TestRunner(config: RunConfig = RunConfig()) {
                 println()
                 result
               } else if (result.passed) {
-                println(s"  ${result.testName}..${Color.Green("ok")} ${result.durationMs} ms")
+                println(s"  ${result.testName}..${LightGreen("ok")} ${result.durationMs} ms")
                 result
               } else {
-                println(s"  ${result.testName}..${Color.Red("DIFF")} ${result.durationMs} ms")
+                println(s"  ${result.testName}..${LightRed("DIFF")} ${result.durationMs} ms")
                 result
               }
 

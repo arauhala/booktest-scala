@@ -17,7 +17,8 @@ object BooktestMain {
     var summaryMode = true // Python-style: diffs at end (default)
     var recaptureAll = false  // -S: force regenerate all snapshots
     var updateSnapshots = false  // -s: auto-accept snapshot changes
-    var threads = 1  // -t N: number of threads for parallel execution
+    var continueMode = false  // -c: continue from last run, skip successful tests
+    var threads = 1  // -p N: number of threads for parallel execution
     var garbageMode = false  // --garbage: list orphan files
     var cleanMode = false  // --clean: remove orphan files and temp directories
     val testClasses = scala.collection.mutable.ListBuffer[String]()
@@ -35,6 +36,7 @@ object BooktestMain {
         case "--inline" => summaryMode = false  // Show diffs inline (old behavior)
         case "-S" | "--recapture" => recaptureAll = true  // Force regenerate all snapshots
         case "-s" | "--update" => updateSnapshots = true  // Auto-accept changes
+        case "-c" | "--continue" => continueMode = true  // Continue from last run
         case "--garbage" => garbageMode = true  // List orphan files in books/
         case "--clean" => cleanMode = true  // Remove orphan files and .tmp directories
         case "-p" =>
@@ -113,6 +115,7 @@ object BooktestMain {
       summaryMode = summaryMode,
       recaptureAll = recaptureAll,
       updateSnapshots = updateSnapshots,
+      continueMode = continueMode,
       threads = threads,
       booktestConfig = booktestConfig
     )
@@ -349,6 +352,7 @@ object BooktestMain {
   
   private def displayTestsAsTree(suites: List[TestSuite], config: RunConfig): Unit = {
     import fansi._
+    import fansi.Color.{LightBlue, LightGreen, LightYellow, LightCyan}
 
     suites.foreach { suite =>
       val suiteName = suite.suiteName
@@ -360,7 +364,7 @@ object BooktestMain {
       }
 
       if (filteredTests.nonEmpty) {
-        println(s"${Color.Blue("📂")} ${fansi.Bold.On(suiteName)}")
+        println(s"${LightBlue("📂")} ${fansi.Bold.On(suiteName)}")
 
         // Build dependency graph for ordering
         val orderedTests = topologicalSort(filteredTests)
@@ -372,23 +376,23 @@ object BooktestMain {
           // Get cache status by checking bin file
           val binFile = config.outputDir / ".out" / os.RelPath(suitePath) / s"${testCase.name}.bin"
           val cacheStatus = if (os.exists(binFile)) {
-            Color.Green("✅")
+            LightGreen("✅")
           } else {
-            Color.Yellow("⏳")
+            LightYellow("⏳")
           }
-          
+
           // Get test duration from logs if available
           val duration = getTestDuration(config.outputDir, suiteName, testCase.name)
           val durationStr = duration.map(d => f"${d}%.2fs").getOrElse("--")
-          
+
           // Build dependency info
           val depInfo = if (testCase.dependencies.nonEmpty) {
-            s" ${Color.Cyan(s"(depends: ${testCase.dependencies.mkString(", ")})")}"
+            s" ${LightCyan(s"(depends: ${testCase.dependencies.mkString(", ")})")}"
           } else {
             ""
           }
-          
-          println(s"$prefix${Color.Yellow("🧪")} ${testCase.name} (${durationStr}, cached: ${cacheStatus})${depInfo}")
+
+          println(s"$prefix${LightYellow("🧪")} ${testCase.name} (${durationStr}, cached: ${cacheStatus})${depInfo}")
         }
         
         // Summary
@@ -477,6 +481,7 @@ object BooktestMain {
     println("  --inline            Show diffs inline (default: show at end)")
     println("  -s, --update        Auto-accept snapshot changes (update mode)")
     println("  -S, --recapture     Force regenerate all snapshots")
+    println("  -c, --continue      Continue from last run, skip successful tests")
     println("  -pN, -p N           Run tests in parallel using N threads (e.g., -p4)")
     println("  --diff-style STYLE  Diff display style: unified, side-by-side, inline, minimal")
     println("  --output-dir DIR    Output directory for test results (default: books)")
@@ -533,7 +538,7 @@ object BooktestMain {
     }
 
     // If no classes found via classpath, try hardcoded fallback for known packages
-    if (classNames.isEmpty && packageName.startsWith("booktest.examples")) {
+    if (classNames.isEmpty && (packageName.startsWith("booktest.examples") || packageName.startsWith("booktest.test"))) {
       classNames ++= getKnownTestClasses(packageName)
     }
 
@@ -556,6 +561,9 @@ object BooktestMain {
   /** Get known test classes for common packages (fallback when classpath scanning fails) */
   private def getKnownTestClasses(packageName: String): List[String] = {
     val allKnown = List(
+      // Meta tests (booktest testing booktest)
+      "booktest.test.ContinueModeTest",
+      // Example tests
       "booktest.examples.ExampleTests",
       "booktest.examples.DependencyTests",
       "booktest.examples.MethodRefTests",

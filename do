@@ -25,19 +25,13 @@ cmd_build() {
 }
 
 cmd_test() {
-    local suite="${1:-}"
-    if [[ -z "$suite" ]]; then
+    # Pass all arguments to BooktestMain
+    if [[ $# -eq 0 ]]; then
         # No args - use default group from booktest.conf
         sbt "Test/runMain booktest.BooktestMain"
-    elif [[ "$suite" != booktest.* ]] && [[ "$suite" != *"."* ]]; then
-        # No dots - might be a group name, let BooktestMain handle it
-        sbt "Test/runMain booktest.BooktestMain $suite"
     else
-        # Full class name or needs package prefix
-        if [[ "$suite" != booktest.* ]]; then
-            suite="booktest.examples.$suite"
-        fi
-        sbt "Test/runMain booktest.BooktestMain $suite"
+        # Pass all arguments directly
+        sbt "Test/runMain booktest.BooktestMain $*"
     fi
 }
 
@@ -60,7 +54,8 @@ case "${1:-help}" in
         cmd_build
         ;;
     test)
-        cmd_test "$2"
+        shift  # Remove "test" from arguments
+        cmd_test "$@"  # Pass all remaining arguments
         ;;
     publish)
         cmd_publish
