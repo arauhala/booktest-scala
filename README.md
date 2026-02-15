@@ -9,325 +9,190 @@ Booktest enables snapshot testing where tests write output to markdown files tha
 ## Key Features
 
 - **Snapshot Testing**: Test output compared against saved markdown files
+- **Parallel Execution**: Run tests concurrently with `-pN`, with resource locks for shared state
+- **Metrics with Tolerance**: Track numeric metrics with absolute/percentage tolerance and direction constraints
 - **Type-Safe Dependencies**: Tests can depend on other tests with compile-time type checking
-- **Method Reference API**: Direct test references instead of string-based dependencies
-- **Dual-Layer Caching**: Results cached in both memory and filesystem
-- **Test Selection**: Filter tests by name patterns
-- **Interactive Mode**: Accept/reject snapshot changes
-- **Colored Output**: Clear success/failure indicators with diff visualization
+- **Snapshot Caching**: Cache expensive computations with automatic invalidation
+- **Continue Mode**: Re-run only failed tests with `-c`
+- **Images and Tables**: Rich output with embedded images and markdown tables
+- **Async Support**: Built-in Future handling with `t.await()` and `t.async {}`
+- **Setup/Teardown**: Per-test and per-suite lifecycle hooks
+- **Test Markers**: Tag tests as Slow, Fast, GPU, etc. for selective execution
+- **Configuration File**: `booktest.ini` for test groups, excludes, and project settings
+- **Interactive Mode**: Accept/reject snapshot changes with colored diffs
+- **Log Capture**: Stdout/stderr captured to `.log` files
 
 ## Quick Start
 
-### Prerequisites
+### Installation
 
-- Scala 3.3.1+
-- SBT 1.x
+Add to your `build.sbt`:
 
-### Build the Project
+```scala
+libraryDependencies += "io.github.arauhala" %% "booktest-scala" % "0.3.0" % Test
+```
 
-```bash
-sbt compile
+Cross-compiled for Scala 2.12, 2.13, and 3.3.
+
+### Write a Test
+
+```scala
+import booktest.*
+
+class MyTests extends TestSuite {
+  def testExample(t: TestCaseRun): Unit = {
+    t.h1("Example Test")
+    t.tln("This line is checked against the snapshot")
+    t.iln("This info line is NOT checked")
+  }
+
+  def testMetrics(t: TestCaseRun): Unit = {
+    t.tmetric("accuracy", 0.923, tolerance = 0.01)
+    t.tmetric("error_rate", 0.077, tolerance = 0.01, direction = Some("max"))
+  }
+}
 ```
 
 ### Run Tests
 
 ```bash
-# Compile test sources
-sbt "Test/compile"
+# Run with verbose output
+sbt "Test/runMain booktest.BooktestMain -v myproject.MyTests"
 
-# Run example tests with verbose output
-sbt "Test/runMain booktest.BooktestMain -v booktest.examples.ExampleTests"
+# Run in parallel with 4 threads
+sbt "Test/runMain booktest.BooktestMain -p4 myproject.MyTests"
 
-# Run dependency tests to see parameter injection
-sbt "Test/runMain booktest.BooktestMain -v booktest.examples.DependencyTests"
+# Continue mode - only re-run failures
+sbt "Test/runMain booktest.BooktestMain -c myproject.MyTests"
 
-# Run method reference tests (improved approach)
-sbt "Test/runMain booktest.BooktestMain -v booktest.examples.MethodRefTests"
+# Interactive mode (accept/reject snapshot changes)
+sbt "Test/runMain booktest.BooktestMain -i myproject.MyTests"
+```
 
-# List test cases
-sbt "Test/runMain booktest.BooktestMain -l booktest.examples.MethodRefTests"
+Or use the `do` script with `booktest.ini` configuration:
 
-# Show test logs
-sbt "Test/runMain booktest.BooktestMain -L booktest.examples.MethodRefTests"
-
-# Filter and show logs
-sbt "Test/runMain booktest.BooktestMain -L -t Data booktest.examples.MethodRefTests"
-
-# Show help
-sbt "Test/runMain booktest.BooktestMain --help"
+```bash
+./do test                        # Run default group
+./do test examples               # Run named group
 ```
 
 ## Test Examples
 
-### Basic Tests
+### Dependencies (Method Reference API)
 
 ```scala
-import booktest.*
-
-class ExampleTests extends TestSuite {
-  def testHello(t: TestCaseRun): Unit = {
-    t.h1("Hello Test")
-    t.tln("Hello, World!")
-    t.tln("This is a simple test")
-  }
-  
-  def testCalculation(t: TestCaseRun): Unit = {
-    t.h1("Calculation Test")
-    val result = 2 + 2
-    t.tln(s"2 + 2 = $result")
-  }
-}
-```
-
-### Dependency Tests
-
-**New Method Reference API (recommended):**
-```scala
-class MethodRefTests extends TestSuite {
-  // Test with no dependencies - returns String
+class DataTests extends TestSuite {
   val data = test("createData") { (t: TestCaseRun) =>
-    t.h1("Create Data Test")
-    val result = "processed_data_123"
-    t.tln(s"Created data: $result")
-    result // Cached automatically
+    t.tln("Creating data...")
+    "processed_data_123"
   }
-  
-  // Test with one dependency - receives cached String parameter
-  val data2 = test("useData", data) { (t: TestCaseRun, cachedData: String) =>
-    t.h1("Use Data Test")
-    t.tln(s"Using cached data: $cachedData") // "processed_data_123"
-    val result = s"enhanced_$cachedData"
-    t.tln(s"Generated result: $result")
-    result
-  }
-  
-  // Test with multiple dependencies - receives both cached values
-  test("finalStep", data, data2) { (t: TestCaseRun, original: String, processed: String) =>
-    t.h1("Final Step Test")
-    t.tln(s"Original: $original")      // "processed_data_123"
-    t.tln(s"Processed: $processed")    // "enhanced_processed_data_123"
+
+  test("useData", data) { (t: TestCaseRun, cachedData: String) =>
+    t.tln(s"Using cached data: $cachedData")
   }
 }
 ```
 
-**Legacy Annotation API:**
+### Metrics with Direction Constraints
+
 ```scala
-class DependencyTests extends TestSuite {
-  def testCreateData(t: TestCaseRun): String = {
-    // ... same as above
+class ModelTests extends TestSuite {
+  def testEvaluate(t: TestCaseRun): Unit = {
+    t.tmetric("accuracy", 0.923, tolerance = 0.01, direction = Some("min"))
+    t.tmetricPct("auc_roc", 0.945, tolerancePct = 2.0)
+    t.imetric("training_time_s", 142.5)
   }
-  
-  @dependsOn("testCreateData")
-  def testUseData(t: TestCaseRun, cachedData: String): String = {
-    // ... same as above
+}
+```
+
+### Setup/Teardown with Resource Locks
+
+```scala
+class SharedStateTests extends TestSuite {
+  override protected def resourceLocks: List[String] = List("shared-db")
+
+  override def setup(t: TestCaseRun): Unit = { initDb() }
+  override def teardown(t: TestCaseRun): Unit = { cleanupDb() }
+
+  def testFirst(t: TestCaseRun): Unit = { /* ... */ }
+  def testSecond(t: TestCaseRun): Unit = { /* ... */ }
+}
+```
+
+### Snapshot Caching
+
+```scala
+class ExpensiveTests extends TestSuite {
+  def testModel(t: TestCaseRun): Unit = {
+    val model = t.snapshot("trained_model") {
+      trainExpensiveModel()  // Only runs once, cached thereafter
+    }
+    t.tmetric("accuracy", evaluate(model), tolerance = 0.01)
   }
 }
 ```
 
 ## CLI Options
 
-```bash
-# Basic usage
-sbt "Test/runMain booktest.BooktestMain [options] <test-class-names>"
-
-# Options:
--v, --verbose       # Verbose output
--i, --interactive   # Interactive mode for snapshot updates
--l, --list          # List test cases
--L, --logs          # Show test logs
--t, --test-filter   # Filter tests by name pattern
---output-dir DIR    # Output directory (default: books)
---snapshot-dir DIR  # Snapshot directory (default: books)
--h, --help         # Show help message
-```
-
-## CLI Examples
-
-```bash
-# Run all tests in a suite
-sbt "Test/runMain booktest.BooktestMain -v booktest.examples.ExampleTests"
-
-# Filter tests by name pattern
-sbt "Test/runMain booktest.BooktestMain -v -t Data booktest.examples.DependencyTests"
-
-# Run multiple test suites
-sbt "Test/runMain booktest.BooktestMain -v booktest.examples.ExampleTests booktest.examples.DependencyTests"
-
-# Interactive mode (accept/reject snapshot changes)
-sbt "Test/runMain booktest.BooktestMain -i booktest.examples.FailingTest"
-```
-
-## Test API
-
-### Core Methods
-
-- `t.h1(title)`, `t.h2(title)`, `t.h3(title)` - Headers
-- `t.tln(text)` - Test line (checked against snapshot)
-- `t.t(text)` - Test text without newline
-- `t.i(text)` - Info text (not checked against snapshot)
-- `t.iln(text)` - Info line with newline
-
-### Dependencies
-
-Tests can declare dependencies using three approaches:
-
-**1. Annotation-based (original):**
-```scala
-@dependsOn("testCreateData")
-def testUseData(t: TestCaseRun, cachedData: String): String = { ... }
-```
-
-**2. Method reference API (recommended):**
-```scala
-val data = test("createData") { (t: TestCaseRun) =>
-  val result = "processed_data_123"
-  t.tln(s"Created: $result")
-  result
-}
-
-val data2 = test("useData", data) { (t: TestCaseRun, cachedData: String) =>
-  t.tln(s"Using: $cachedData")
-  s"enhanced_$cachedData"
-}
-```
-
-**3. Type-safe dependencies with multiple inputs:**
-```scala
-test("finalStep", data, data2) { (t: TestCaseRun, original: String, processed: String) =>
-  t.tln(s"Original: $original, Processed: $processed")
-}
-```
-
-#### Key Benefits of Method Reference API:
-
-1. **Type Safety**: Dependencies are type-checked at compile time
-2. **No String References**: Direct method references prevent typos and support refactoring
-3. **IDE Support**: Full auto-completion and navigation support
-4. **Parameter Injection**: Cached values automatically injected with correct types
-5. **Return Value Caching**: Results automatically cached in memory and filesystem
-
-#### How it works:
-1. **Test Declaration**: Use `test()` method with lambda functions
-2. **Dependency References**: Pass `TestRef` objects directly as dependencies
-3. **Type Inference**: Return types automatically inferred and cached
-4. **Parameter Injection**: Cached values passed as typed parameters to dependent tests
+| Option | Description |
+|--------|-------------|
+| `-v, --verbose` | Verbose output |
+| `-pN` | Parallel execution with N threads |
+| `-c, --continue` | Skip tests that passed in previous run |
+| `-i, --interactive` | Interactive mode for snapshot updates |
+| `-l, --list` | List test cases |
+| `-L, --logs` | Show test logs |
+| `-t PATTERN` | Filter tests by name pattern |
+| `-w, --review` | Review mode (show diffs without running) |
+| `-S, --recapture` | Force regenerate all snapshots |
+| `-s, --update` | Auto-accept all snapshot changes |
+| `--tree` | Hierarchical tree display (with `-l`) |
+| `--inline` | Show diffs inline during execution |
+| `--garbage` | List orphan files in books/ |
+| `--clean` | Remove orphan files and tmp directories |
 
 ## Output Structure
 
 ```
-books/                          # Snapshot directory
-├── .cache/                     # Cached test results
-│   ├── createData.cache        # "STRING:processed_data_123"
-│   └── useData.cache          # "STRING:enhanced_processed_data_123"
-├── .out/                      # Test logs directory
-│   ├── ExampleTests/
-│   │   ├── hello.log          # Test execution logs
-│   │   └── calculation.log
-│   └── MethodRefTests/
-│       ├── createData.log
-│       ├── testUseData.log
-│       └── testFinalStep.log
-├── ExampleTests/              # Test suite snapshots
-│   ├── hello.md               # Test output snapshots
-│   ├── calculation.md
-│   └── ...
-└── DependencyTests/
-    ├── createData.md
-    ├── useData.md
-    └── finalStep.md
+books/
+├── .out/                        # Test execution output (gitignored)
+│   └── SuiteName/
+│       ├── testName/            # Tmp directory for test
+│       ├── testName.bin         # Return value cache
+│       ├── testName.md          # Test output
+│       ├── testName.log         # Captured stdout/stderr
+│       └── testName.snapshots.json
+├── SuiteName/                   # Committed snapshots
+│   ├── testName.md
+│   └── testName/                # Asset directory (images, etc.)
+└── cases.ndjson                 # Test results for continue mode
 ```
 
-## How It Works
+## Documentation
 
-1. **Test Execution**: Tests run and generate markdown output
-2. **Snapshot Comparison**: Output compared against saved `.md` files
-3. **Dependency Resolution**: Tests with dependencies run in correct order
-4. **Parameter Injection**: Cached values injected as method parameters
-5. **Result Caching**: Return values cached in memory and filesystem
-6. **Diff Generation**: Failed tests show colored diffs
-
-## Development
-
-See `CLAUDE.md` for development guidance and architecture details.
-
-## Migration Status
-
-This is a Scala port of the Python booktest framework with full feature parity for core and advanced features.
-
-**✅ Implemented:**
-- Snapshot testing with markdown output
-- Test discovery and execution
-- Dependency injection with parameter passing (up to 3 dependencies)
-- Dual-layer caching (memory + filesystem)
-- Test filtering and selection
-- Interactive and batch review modes
-- CLI interface with tree view
-- HTTP request/response snapshotting
-- Environment variable snapshotting
-- Function call snapshotting
-
-**Planned:**
-- Parallel execution
-- Resource management (port pools, memory allocation)
-- SBT plugin integration
-
-## Advanced Features
-
-### HTTP Snapshotting
-
-Capture and replay HTTP requests/responses:
-
-```scala
-import booktest.*
-
-class HttpSnapshotTests extends TestSuite {
-  def testHttpGet(t: TestCaseRun): Unit = {
-    val client = HttpSnapshotting.createClient(t)
-    val response = client.get("https://api.example.com/data")
-    t.tln(s"Status: ${response.code}")
-    t.tln(s"Body: ${response.body}")
-  }
-}
-```
-
-### Environment Variable Snapshotting
-
-Mock and snapshot environment variables:
-
-```scala
-class EnvSnapshotTests extends TestSuite {
-  def testEnvVars(t: TestCaseRun): Unit = {
-    EnvSnapshotting.withEnv(Map("API_KEY" -> "test_key"), t) {
-      val value = EnvSnapshotting.get("API_KEY", t)
-      t.tln(s"API_KEY = $value")
-    }
-  }
-}
-```
-
-### Function Call Snapshotting
-
-Capture expensive function calls and replay from cache:
-
-```scala
-class FunctionSnapshotTests extends TestSuite {
-  def testExpensiveCalculation(t: TestCaseRun): Unit = {
-    val cachedFn = FunctionSnapshotting.cached[Int, String]("expensiveOp", t) { n =>
-      // This only runs on first execution, cached thereafter
-      s"Result for $n"
-    }
-    t.tln(cachedFn(42))
-  }
-}
-```
+- **[USAGE.md](USAGE.md)** - Detailed usage guide with all API methods and examples
+- **[CHANGELOG.md](CHANGELOG.md)** - Release history and changes
+- **[CLAUDE.md](CLAUDE.md)** - Development guidance and architecture details
 
 ## Examples
 
 The `src/test/scala/booktest/examples/` directory contains working examples:
 
-- `ExampleTests.scala` - Basic test examples
-- `DependencyTests.scala` - Dependency injection examples (string approach)
-- `MethodRefTests.scala` - Dependency injection with method references (recommended)
-- `FailingTest.scala` - Example of failing tests with diffs
+- `ExampleTests.scala` - Basic snapshot testing
+- `DependencyTests.scala` - Annotation-based dependencies
+- `MethodRefTests.scala` - Method reference API (recommended)
+- `MetricsTest.scala` - Metrics with tolerance and direction constraints
+- `ImageTest.scala` - Image output in snapshots
+- `InfoMethodsTest.scala` - Tables and structured output
+- `SnapshotCacheTest.scala` - Caching expensive computations
+- `AsyncTest.scala` - Async/Future support
+- `TmpDirTest.scala` - Temporary file management
+- `SetupTeardownTest.scala` - Lifecycle hooks
+- `MarkersTest.scala` - Test tagging and filtering
+- `DirectionConstraintsTest.scala` - Metric regression prevention
 
-Run any of these to see the framework in action!
+## Links
+
+- GitHub: https://github.com/arauhala/booktest-scala
+- Maven Central: [io.github.arauhala:booktest-scala](https://central.sonatype.com/artifact/io.github.arauhala/booktest-scala_3)
+- Original Python booktest: https://github.com/lumoa-oss/booktest
