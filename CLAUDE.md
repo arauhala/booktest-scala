@@ -28,6 +28,7 @@ Test output is written to `books/` directory as markdown files and compared agai
 ```
 booktest-scala/
 ├── build.sbt                    # SBT build configuration
+├── booktest.ini                 # Test configuration (root, groups, exclude patterns)
 ├── src/main/scala/booktest/     # Core framework implementation
 ├── src/test/scala/booktest/     # Framework tests and examples
 └── books/                       # Snapshot storage directory
@@ -82,6 +83,15 @@ sbt "Test/runMain booktest.BooktestMain -v booktest.examples.FunctionSnapshotTes
 
 # Review mode (show diffs without re-running tests)
 sbt "Test/runMain booktest.BooktestMain -w booktest.examples.ExampleTests"
+
+# Parallel execution (4 threads)
+sbt "Test/runMain booktest.BooktestMain -p4 examples"
+
+# Garbage collection (list orphan files)
+sbt "Test/runMain booktest.BooktestMain --garbage"
+
+# Clean orphan files and tmp directories
+sbt "Test/runMain booktest.BooktestMain --clean"
 ```
 
 ## Test API Design
@@ -99,17 +109,27 @@ class ExampleTests extends TestSuite {
   }
 }
 
-// String-based dependencies (legacy approach)
+// Annotation-based dependencies (for execution order and value injection)
 class DependencyTests extends TestSuite {
   def testCreateData(t: TestCaseRun): String = {
     t.tln("Creating data...")
     "some_data"
   }
-  
-  @dependsOn("testCreateData")
+
+  @DependsOn(Array("testCreateData"))
   def testUseData(t: TestCaseRun, cachedData: String): Unit = {
     t.tln(s"Using cached data: $cachedData")
   }
+}
+
+// Resource locks for tests sharing mutable state
+class SharedStateTests extends TestSuite {
+  // All tests in this suite will run sequentially (even with -pN)
+  override protected def resourceLocks: List[String] = List("shared-state")
+
+  private var counter = 0
+  def testFirst(t: TestCaseRun): Unit = { counter += 1 }
+  def testSecond(t: TestCaseRun): Unit = { counter += 1 }
 }
 
 // Method reference API (recommended approach)
@@ -197,25 +217,32 @@ class FunctionSnapshotTests extends TestSuite {
 
 ## Architecture Patterns
 
-### Dual-Layer Caching System
+### Caching System
 - **Memory Cache**: Fast in-process storage for test execution
-- **Filesystem Cache**: Persistent storage in `books/.cache/` directory
-- **Cache Format**: Simple text format (e.g., "STRING:value", "INT:42")
-- **Type Support**: String, Int, Double, Boolean, and general objects via toString
+- **Per-test Cache**: Persistent storage in `testName.bin` alongside test output
+- **Cache Format**: Simple text format (e.g., "STRING:value", "INT:42", "LONG:123")
+- **Type Support**: String, Int, Long, Double, Boolean, and general objects via toString
 
 ### Test Discovery and Execution
 - **Reflection-based**: Discovers methods starting with "test" that take TestCaseRun as first parameter
 - **Dependency Resolution**: Topological sort ensures correct execution order
-- **Sequential Execution**: Single-threaded execution for reliability and simplicity
+- **Parallel Execution**: Use `-pN` for N parallel threads (e.g., `-p4`)
 - **Error Handling**: Proper cleanup with detailed error reporting
 
-### File Organization
+### File Organization (Python-style)
 ```
 books/
-├── .cache/              # Cached test results (gitignored)
-├── .out/               # Test execution logs (gitignored)
-├── TestSuiteName/      # Final snapshots (committed to Git)
-└── _snapshots/         # JSON snapshots for HTTP/Env/Function data
+├── .out/                        # Test execution output (gitignored)
+│   └── SuiteName/
+│       ├── testName/            # Tmp directory for test
+│       ├── testName.bin         # Return value cache (for dependencies)
+│       ├── testName.md          # Test output
+│       ├── testName.log         # Captured stdout/stderr
+│       ├── testName.txt         # Test report
+│       └── testName.snapshots.json  # HTTP/function snapshots
+├── SuiteName/                   # Final snapshots (committed to Git)
+│   └── testName.md
+└── index.md                     # Optional index file
 ```
 
 ### Snapshot Comparison

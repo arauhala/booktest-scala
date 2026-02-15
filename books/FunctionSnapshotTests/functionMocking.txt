@@ -1,1 +1,0 @@
-Test 'functionMocking' completed in 2ms

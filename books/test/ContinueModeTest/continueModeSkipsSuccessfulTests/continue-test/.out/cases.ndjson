@@ -1,0 +1,3 @@
+{"name":"test/suite1/testA","result":"OK","duration_ms":10}
+{"name":"test/suite1/testB","result":"OK","duration_ms":20}
+{"name":"test/suite1/testC","result":"DIFF","duration_ms":30}

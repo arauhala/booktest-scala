@@ -1,4 +1,4 @@
-ThisBuild / version := "0.2.1"
+ThisBuild / version := "0.3.0"
 ThisBuild / scalaVersion := "3.3.1"
 ThisBuild / crossScalaVersions := Seq("2.12.18", "2.13.12", "3.3.1")
 
@@ -45,6 +45,8 @@ lazy val root = (project in file("."))
       "com.softwaremill.sttp.client3" %% "okhttp-backend" % "3.9.1",
       "org.scalameta" %% "munit" % "0.7.29" % Test
     ),
+    // Target Java 11 for compatibility with consumers using JDK 11
+    javacOptions ++= Seq("-source", "11", "-target", "11"),
     scalacOptions ++= Seq(
       "-deprecation",
       "-feature",

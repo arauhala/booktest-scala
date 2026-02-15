@@ -1,6 +1,7 @@
 package booktest
 
 import fansi.Color
+import fansi.Color.{LightRed, LightGreen, LightYellow, LightCyan, LightBlue}
 
 // Diff display modes
 sealed trait DiffMode
@@ -18,7 +19,8 @@ case class TestResult(
   snapshot: Option[String] = None,
   diff: Option[String] = None,
   returnValue: Option[Any] = None,
-  durationMs: Long = 0
+  durationMs: Long = 0,
+  testRun: Option[TestCaseRun] = None  // For parallel execution to access test output
 )
 
 object SnapshotManager {
@@ -52,8 +54,28 @@ object SnapshotManager {
   }
 
   def updateSnapshot(testRun: TestCaseRun): Unit = {
+    // Copy main test output (markdown)
     os.makeDir.all(testRun.snapshotFile / os.up)
     os.write.over(testRun.snapshotFile, testRun.getTestOutput)
+
+    // Copy test assets directory if it exists (images, generated files)
+    // Python style: books/<suite>/<test>/ for assets
+    val assetsDir = testRun.assetsDir
+    val snapshotAssetsDir = testRun.snapshotDir / testRun.testName
+    if (os.exists(assetsDir) && os.list(assetsDir).nonEmpty) {
+      os.makeDir.all(snapshotAssetsDir)
+      os.list(assetsDir).foreach { file =>
+        val name = file.last
+        // Copy files (hashed images have no extension, but copy everything)
+        os.copy.over(file, snapshotAssetsDir / name)
+      }
+    }
+
+    // Copy snapshots.json if it exists (HTTP/function snapshots)
+    if (os.exists(testRun.snapshotsFile)) {
+      val snapshotJsonDest = testRun.snapshotDir / s"${testRun.testName}.snapshots.json"
+      os.copy.over(testRun.snapshotsFile, snapshotJsonDest)
+    }
   }
   
   def generateDiff(expected: String, actual: String, mode: DiffMode = DiffMode.Unified): String = {
@@ -79,10 +101,10 @@ object SnapshotManager {
       } else {
         val result = new StringBuilder
         if (expectedLine.nonEmpty) {
-          result.append(Color.Red(s"- $expectedLine")).append("\n")
+          result.append(LightRed(s"- $expectedLine")).append("\n")
         }
         if (actualLine.nonEmpty) {
-          result.append(Color.Green(s"+ $actualLine"))
+          result.append(LightGreen(s"+ $actualLine"))
         }
         result.toString
       }
@@ -119,8 +141,8 @@ object SnapshotManager {
       if (expectedLine == actualLine) {
         s"${expectedDisplay.padTo(maxWidth, ' ')} | ${actualDisplay.padTo(maxWidth, ' ')}"
       } else {
-        val expectedFormatted = if (expectedLine.nonEmpty) Color.Red(expectedDisplay.padTo(maxWidth, ' ')) else "".padTo(maxWidth, ' ')
-        val actualFormatted = if (actualLine.nonEmpty) Color.Green(actualDisplay.padTo(maxWidth, ' ')) else "".padTo(maxWidth, ' ')
+        val expectedFormatted = if (expectedLine.nonEmpty) LightRed(expectedDisplay.padTo(maxWidth, ' ')) else "".padTo(maxWidth, ' ')
+        val actualFormatted = if (actualLine.nonEmpty) LightGreen(actualDisplay.padTo(maxWidth, ' ')) else "".padTo(maxWidth, ' ')
         s"$expectedFormatted | $actualFormatted"
       }
     }
@@ -141,12 +163,12 @@ object SnapshotManager {
         List(f"${i + 1}%3d: $actualLine")
       } else {
         val result = List.newBuilder[String]
-        result += s"${Color.Blue(s"@@ Line ${i + 1} @@")}"
+        result += s"${LightBlue(s"@@ Line ${i + 1} @@")}"
         if (expectedLine.nonEmpty) {
-          result += s"${Color.Red(s"- $expectedLine")}"
+          result += s"${LightRed(s"- $expectedLine")}"
         }
         if (actualLine.nonEmpty) {
-          result += s"${Color.Green(s"+ $actualLine")}"
+          result += s"${LightGreen(s"+ $actualLine")}"
         }
         result.result()
       }
@@ -177,10 +199,10 @@ object SnapshotManager {
   
   def printTestResult(result: TestResult, interactive: Boolean = false): Boolean = {
     if (result.passed) {
-      println(Color.Green(s"✓ ${result.testName}"))
+      println(LightGreen(s"✓ ${result.testName}"))
       false
     } else {
-      println(Color.Red(s"✗ ${result.testName}"))
+      println(LightRed(s"✗ ${result.testName}"))
       result.diff.foreach { diff =>
         println(s"\nDiff for ${result.testName}:")
         println(diff)
@@ -201,17 +223,17 @@ object SnapshotManager {
     val failedResults = results.filter(!_.passed)
     
     if (failedResults.isEmpty) {
-      println(Color.Green("All tests passed! No review needed."))
+      println(LightGreen("All tests passed! No review needed."))
       results
     } else {
-      println(Color.Blue(s"\n📋 Batch Review Mode: ${failedResults.length} failed tests found"))
+      println(LightBlue(s"\n📋 Batch Review Mode: ${failedResults.length} failed tests found"))
       println("=" * 60)
       
       val updatedResults = scala.collection.mutable.ListBuffer[TestResult]()
       var quit = false
       
       failedResults.zipWithIndex.takeWhile(_ => !quit).foreach { case (result, index) =>
-        println(Color.Blue(s"\n[${index + 1}/${failedResults.length}] Reviewing: ${result.testName}"))
+        println(LightBlue(s"\n[${index + 1}/${failedResults.length}] Reviewing: ${result.testName}"))
         println("-" * 40)
         
         result.diff.foreach { diff =>
@@ -226,31 +248,31 @@ object SnapshotManager {
         var shouldSkip = false
         
         while (!validInput && !quit) {
-          print(s"${Color.Yellow("Options:")} [y]es / [n]o / [s]kip / [q]uit: ")
+          print(s"${LightYellow("Options:")} [y]es / [n]o / [s]kip / [q]uit: ")
           val input = scala.io.StdIn.readLine().trim.toLowerCase
           
           input match {
             case "y" | "yes" =>
               shouldAccept = true
               validInput = true
-              println(Color.Green("✓ Changes accepted"))
+              println(LightGreen("✓ Changes accepted"))
               
             case "n" | "no" =>
               shouldAccept = false
               validInput = true
-              println(Color.Red("✗ Changes rejected"))
+              println(LightRed("✗ Changes rejected"))
               
             case "s" | "skip" =>
               shouldSkip = true
               validInput = true
-              println(Color.Yellow("⏭ Skipped"))
+              println(LightYellow("⏭ Skipped"))
               
             case "q" | "quit" =>
-              println(Color.Blue("Review session terminated."))
+              println(LightBlue("Review session terminated."))
               quit = true
               
             case _ =>
-              println(Color.Red("Invalid input. Please enter 'y', 'n', 's', or 'q'."))
+              println(LightRed("Invalid input. Please enter 'y', 'n', 's', or 'q'."))
           }
         }
         

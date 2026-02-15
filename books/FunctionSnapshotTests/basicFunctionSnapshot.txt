@@ -1,1 +1,0 @@
-Test 'basicFunctionSnapshot' completed in 171ms

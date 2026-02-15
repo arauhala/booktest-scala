@@ -3,11 +3,76 @@ package booktest
 // Test reference for type-safe dependency injection
 case class TestRef[T](name: String, dependencies: List[TestRef[?]] = List.empty)
 
+// Test markers/tags for filtering and categorization
+object TestMarkers {
+  val Slow = "slow"
+  val Fast = "fast"
+  val Integration = "integration"
+  val Unit = "unit"
+  val GPU = "gpu"
+  val Network = "network"
+  val Flaky = "flaky"
+}
+
 abstract class TestSuite {
   private var _testCases: List[TestCase] = List.empty
-  
+  private var _markers: Map[String, Set[String]] = Map.empty  // testName -> markers
+
   lazy val testCases: List[TestCase] = discoverTests()
-  
+
+  // ============ Setup/Teardown Hooks ============
+
+  /** Override to run setup before each test */
+  protected def setup(t: TestCaseRun): Unit = {}
+
+  /** Override to run teardown after each test (even if test fails) */
+  protected def teardown(t: TestCaseRun): Unit = {}
+
+  /** Override to run once before all tests in the suite */
+  protected def beforeAll(): Unit = {}
+
+  /** Override to run once after all tests in the suite */
+  protected def afterAll(): Unit = {}
+
+  /** Get setup function for TestRunner */
+  def getSetup: TestCaseRun => Unit = setup
+
+  /** Get teardown function for TestRunner */
+  def getTeardown: TestCaseRun => Unit = teardown
+
+  /** Get beforeAll function for TestRunner */
+  def getBeforeAll: () => Unit = () => beforeAll()
+
+  /** Get afterAll function for TestRunner */
+  def getAfterAll: () => Unit = () => afterAll()
+
+  // ============ Resource Locks ============
+
+  /** Override to specify locks that must be held during test execution.
+    * Tests in different suites with the same lock name will not run in parallel.
+    * Useful for tests that share mutable state or external resources.
+    *
+    * Example: override def resourceLocks: List[String] = List("database", "shared-state")
+    */
+  protected def resourceLocks: List[String] = List.empty
+
+  /** Get resource locks for TestRunner */
+  def getResourceLocks: List[String] = resourceLocks
+
+  // ============ Test Markers ============
+
+  /** Mark a test with tags for filtering */
+  protected def mark(testName: String, markers: String*): Unit = {
+    val existing = _markers.getOrElse(testName, Set.empty)
+    _markers = _markers + (testName -> (existing ++ markers.toSet))
+  }
+
+  /** Get markers for a test */
+  def getMarkers(testName: String): Set[String] = _markers.getOrElse(testName, Set.empty)
+
+  /** Check if a test has a specific marker */
+  def hasMarker(testName: String, marker: String): Boolean = getMarkers(testName).contains(marker)
+
   protected def registerTest(name: String, testFunction: TestCaseRun => Any): Unit = {
     _testCases = _testCases :+ TestCase(name, testFunction)
   }
@@ -61,7 +126,11 @@ abstract class TestSuite {
       method.getName.startsWith("test") &&
       !method.getName.contains("$anonfun$") && // Filter out synthetic lambda methods
       method.getParameterCount >= 1 &&
-      method.getParameterTypes()(0) == classOf[TestCaseRun]
+      method.getParameterTypes()(0) == classOf[TestCaseRun] &&
+      // Only discover multi-param methods if they have @DependsOn annotation.
+      // This prevents helper methods like testAllColumns(t, columns) from being
+      // picked up as phantom tests and failing with "wrong number of arguments".
+      (method.getParameterCount == 1 || method.getAnnotation(classOf[DependsOn]) != null)
     }
     
     testMethods.map { method =>
@@ -76,10 +145,16 @@ abstract class TestSuite {
   }
   
   private def extractDependencies(method: java.lang.reflect.Method): List[String] = {
-    // Try annotation-based dependencies first, then fall back to inference
+    // Try Java @DependsOn annotation first (has proper runtime retention)
+    val javaAnnotation = method.getAnnotation(classOf[DependsOn])
+    if (javaAnnotation != null) {
+      return javaAnnotation.value().toList.map(cleanMethodName)
+    }
+
+    // Try Scala annotation-based dependencies (legacy, may not have runtime retention)
     val annotations = method.getAnnotations
     val annotationDeps = annotations.collectFirst {
-      case annotation if annotation.annotationType().getSimpleName == "dependsOnAnnotation" || 
+      case annotation if annotation.annotationType().getSimpleName == "dependsOnAnnotation" ||
                          annotation.annotationType().getSimpleName == "dependsOn" =>
         try {
           val dependenciesMethod = annotation.annotationType().getMethod("dependencies")
@@ -88,23 +163,9 @@ abstract class TestSuite {
           case _: Exception => List.empty[String]
         }
     }.getOrElse(List.empty)
-    
-    // If annotation dependencies found, use them; otherwise infer from signature
-    if (annotationDeps.nonEmpty) {
-      annotationDeps
-    } else {
-      // Infer dependencies from method signature
-      val paramCount = method.getParameterCount
-      if (paramCount > 1) {
-        method.getName match {
-          case name if name.contains("UseData") => List("createData") 
-          case name if name.contains("FinalStep") => List("createData", "useData")
-          case _ => List.empty
-        }
-      } else {
-        List.empty
-      }
-    }
+
+    // If Scala annotation dependencies found, clean them to match test names
+    annotationDeps.map(cleanMethodName)
   }
   
   private def cleanMethodName(methodName: String): String = {
@@ -120,8 +181,19 @@ abstract class TestSuite {
     }
   }
   
+  /** Simple class name (without package) */
   def suiteName: String = {
     val className = this.getClass.getSimpleName
+    if (className.endsWith("$")) {
+      className.dropRight(1)
+    } else {
+      className
+    }
+  }
+
+  /** Fully qualified class name (with package) */
+  def fullClassName: String = {
+    val className = this.getClass.getName
     if (className.endsWith("$")) {
       className.dropRight(1)
     } else {

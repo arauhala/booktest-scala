@@ -14,7 +14,9 @@ show_help() {
     echo ""
     echo "Examples:"
     echo "  ./do build"
-    echo "  ./do test ExampleTests"
+    echo "  ./do test                    # Run default group from booktest.conf"
+    echo "  ./do test examples           # Run 'examples' group from booktest.conf"
+    echo "  ./do test ExampleTests       # Run specific test suite"
     echo "  ./do publish"
 }
 
@@ -23,12 +25,14 @@ cmd_build() {
 }
 
 cmd_test() {
-    local suite="${1:-booktest.examples.ExampleTests}"
-    # Add package prefix if not already present
-    if [[ "$suite" != booktest.* ]]; then
-        suite="booktest.examples.$suite"
+    # Pass all arguments to BooktestMain
+    if [[ $# -eq 0 ]]; then
+        # No args - use default group from booktest.conf
+        sbt "Test/runMain booktest.BooktestMain"
+    else
+        # Pass all arguments directly
+        sbt "Test/runMain booktest.BooktestMain $*"
     fi
-    sbt "Test/runMain booktest.BooktestMain -v $suite"
 }
 
 cmd_publish() {
@@ -50,7 +54,8 @@ case "${1:-help}" in
         cmd_build
         ;;
     test)
-        cmd_test "$2"
+        shift  # Remove "test" from arguments
+        cmd_test "$@"  # Pass all remaining arguments
         ;;
     publish)
         cmd_publish

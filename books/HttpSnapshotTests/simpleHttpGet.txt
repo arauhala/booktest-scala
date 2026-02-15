@@ -1,1 +1,0 @@
-Test 'simpleHttpGet' completed in 57ms

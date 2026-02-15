@@ -1,0 +1,3 @@
+{"name":"test/a","result":"OK","duration_ms":100}
+{"name":"test/b","result":"DIFF","duration_ms":200}
+{"name":"test/c","result":"FAIL","duration_ms":300}
