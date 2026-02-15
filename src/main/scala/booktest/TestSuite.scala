@@ -126,7 +126,11 @@ abstract class TestSuite {
       method.getName.startsWith("test") &&
       !method.getName.contains("$anonfun$") && // Filter out synthetic lambda methods
       method.getParameterCount >= 1 &&
-      method.getParameterTypes()(0) == classOf[TestCaseRun]
+      method.getParameterTypes()(0) == classOf[TestCaseRun] &&
+      // Only discover multi-param methods if they have @DependsOn annotation.
+      // This prevents helper methods like testAllColumns(t, columns) from being
+      // picked up as phantom tests and failing with "wrong number of arguments".
+      (method.getParameterCount == 1 || method.getAnnotation(classOf[DependsOn]) != null)
     }
     
     testMethods.map { method =>

@@ -49,6 +49,8 @@ class MyTests extends TestSuite {
 | `t.fail(msg)` | Mark test as failed | N/A |
 | `t.file(name)` | Get File in output dir | N/A |
 
+Note: `t.tln` and `t.iln` can be called without parentheses to output an empty line.
+
 ### Metrics with Tolerance
 
 For data science workflows where numeric values vary slightly between runs:
@@ -282,6 +284,13 @@ class MixedTests extends TestSuite {
 ```
 
 Predefined markers: `Slow`, `Fast`, `Integration`, `Unit`, `GPU`, `Network`, `Flaky`.
+
+### Test Discovery
+
+Test methods are discovered by reflection: any method starting with `test` whose first
+parameter is `TestCaseRun`. Methods with additional parameters are only discovered if
+they have a `@DependsOn` annotation — this prevents helper methods like
+`testAllColumns(t: TestCaseRun, columns: List[String])` from being picked up as tests.
 
 ### HTTP Snapshotting
 

@@ -86,6 +86,8 @@ class TestCaseRun(
     header(s"### $title")
   }
   
+  def tln: TestCaseRun = tln("")
+
   def tln(text: String = ""): TestCaseRun = {
     testFeed(text)
     testFeed("\n")
@@ -102,6 +104,8 @@ class TestCaseRun(
     this
   }
   
+  def iln: TestCaseRun = iln("")
+
   def iln(text: String = ""): TestCaseRun = {
     infoFeed(text)
     infoFeed("\n")

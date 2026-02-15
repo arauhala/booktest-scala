@@ -111,8 +111,12 @@ books/
 - **`t.assertln(condition, message)`**: Assert with automatic OK/FAILED output
 - **`t.key(key, value)`**: Output labeled key-value pairs
 - **`t.fail(message)`**: Explicitly mark test as failed
-- **`t.iMsLn { block }`**: Execute block and print elapsed time
+- **`t.iMsLn("label") { block }`**: Execute block and print elapsed time as info
 - **`t.ms { block }`**: Returns `(elapsed_ms, result)` tuple
+- **`t.tln` / `t.iln` without parentheses**: Output empty line without needing `()`
+- **Safer test discovery**: Helper methods starting with `test` that take extra
+  parameters (beyond `TestCaseRun`) are no longer picked up as phantom tests
+  unless they have a `@DependsOn` annotation
 - Python-style colored terminal output
 - SBT plugin scaffolding (`plugin/` directory)
 

@@ -19,6 +19,7 @@ Booktest enables snapshot testing where tests write output to markdown files tha
 - **Setup/Teardown**: Per-test and per-suite lifecycle hooks
 - **Test Markers**: Tag tests as Slow, Fast, GPU, etc. for selective execution
 - **Configuration File**: `booktest.ini` for test groups, excludes, and project settings
+- **Safe Test Discovery**: Only methods with `@DependsOn` are discovered when they have extra parameters — no more phantom tests from helper methods
 - **Interactive Mode**: Accept/reject snapshot changes with colored diffs
 - **Log Capture**: Stdout/stderr captured to `.log` files
 
