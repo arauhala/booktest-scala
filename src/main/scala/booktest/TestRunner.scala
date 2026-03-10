@@ -45,7 +45,7 @@ case class RunResult(
 
 class TestRunner(config: RunConfig = RunConfig()) {
   private val dependencyCache = new DependencyCache()
-  private val resourceManager = new ResourceManager()
+  private val resourceManager = ResourceManager.fromEnv()
 
   /** Get the resource manager for tests that need ports/resources */
   def resources: ResourceManager = resourceManager
@@ -76,7 +76,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
       testPath = testPath,
       outputDir = outputDir,
       snapshotDir = snapshotDir,
-      outDir = outDir
+      outDir = outDir,
+      resourceManager = Some(resourceManager)
     )
     testRun.setFlags(config.recaptureAll, config.updateSnapshots)
 
@@ -297,8 +298,12 @@ class TestRunner(config: RunConfig = RunConfig()) {
     }
 
     // Run suites (filtering out tests that were skipped in continue mode)
-    val allResults = suites.map { suite =>
-      runSuiteWithFilter(suite, todoSet)
+    val allResults = if (config.threads > 1) {
+      runSuitesParallel(suites, todoSet)
+    } else {
+      suites.map { suite =>
+        runSuiteWithFilter(suite, todoSet)
+      }
     }
 
     val endTime = System.currentTimeMillis()
@@ -473,7 +478,30 @@ class TestRunner(config: RunConfig = RunConfig()) {
       results = results
     )
   }
-  
+
+  /** Run multiple suites in parallel, each suite sequential internally.
+    * Output may interleave but test results are correct.
+    */
+  private def runSuitesParallel(suites: List[TestSuite], todoSet: Set[String]): List[RunResult] = {
+    import java.util.concurrent.{Executors, Callable, Future => JFuture}
+
+    val executor = Executors.newFixedThreadPool(config.threads)
+
+    try {
+      val futures: List[JFuture[RunResult]] = suites.map { suite =>
+        executor.submit(new Callable[RunResult] {
+          override def call(): RunResult = {
+            runSuiteWithFilter(suite, todoSet)
+          }
+        })
+      }
+
+      futures.map(_.get())
+    } finally {
+      executor.shutdown()
+    }
+  }
+
   def reviewResults(suites: List[TestSuite]): Int = {
     val outDir = config.outputDir / ".out"
     val reports = CaseReports.fromDir(outDir)
@@ -744,7 +772,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
       testPath = testPath,
       outputDir = outputDir,
       snapshotDir = snapshotDir,
-      outDir = outDir
+      outDir = outDir,
+      resourceManager = Some(resourceManager)
     )
     testRun.setFlags(config.recaptureAll, config.updateSnapshots)
     testRun.clearTmpDir()
