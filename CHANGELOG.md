@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.1 (2026-03-13)
+
+- **`--root` CLI flag**: Override package prefix stripping from the command line
+  (alternative to setting `root` in `booktest.ini`)
+- **Port management API**: `t.acquirePort()`, `t.releasePort()`, `t.withPort { port => }` for
+  tests that need network ports
+- **Env-configurable port range**: `BOOKTEST_PORT_BASE` and `BOOKTEST_PORT_MAX` environment
+  variables for CI environments with restricted ports
+- **Suite-level parallel execution**: With `-pN`, suites now run in parallel (tests within
+  each suite remain sequential)
+- **Fix**: `RelPath` handling for `--output-dir` and `--snapshot-dir` with nested paths
+
 ## 0.3.0 (2026-02-14)
 
 Major release adding parallel execution, Python-style file structure, rich test output,
