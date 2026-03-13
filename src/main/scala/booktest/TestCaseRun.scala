@@ -7,7 +7,8 @@ class TestCaseRun(
   val testPath: Path,       // Full path: suitePath / testName
   val outputDir: Path,      // Legacy: same as snapshotDir
   val snapshotDir: Path,    // books/<suite>/
-  val outDir: Path          // books/.out/<suite>/
+  val outDir: Path,         // books/.out/<suite>/
+  private val resourceManager: Option[ResourceManager] = None
 ) {
   private val outputBuffer = new StringBuilder
   private val testBuffer = new StringBuilder  // test-only content (no info lines)
@@ -1040,5 +1041,22 @@ class TestCaseRun(
       case Some(snapshot) => snapshot.trim == getTestOutput.trim
       case None => false
     }
+  }
+
+  // -- Port management (delegates to ResourceManager's PortPool) --
+
+  /** Acquire a port from the resource manager's port pool */
+  def acquirePort(): Int = resourceManager match {
+    case Some(rm) => rm.ports.acquire()
+    case None => throw new IllegalStateException("No ResourceManager configured - cannot acquire port")
+  }
+
+  /** Release a port back to the pool */
+  def releasePort(port: Int): Unit = resourceManager.foreach(_.ports.release(port))
+
+  /** Use a port with automatic release */
+  def withPort[T](block: Int => T): T = resourceManager match {
+    case Some(rm) => rm.ports.use(block)
+    case None => throw new IllegalStateException("No ResourceManager configured - cannot acquire port")
   }
 }

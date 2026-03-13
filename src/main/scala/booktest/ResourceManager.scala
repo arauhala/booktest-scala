@@ -9,8 +9,7 @@ import scala.util.Try
  * Resource manager for parallel test execution.
  * Manages port pools, memory limits, and other shared resources.
  */
-class ResourceManager {
-  private val portPool = new PortPool()
+class ResourceManager(portPool: PortPool = new PortPool()) {
   private val lockPool = new LockPool()
   private val resources = mutable.Map[String, ResourcePool[Any]]()
 
@@ -196,6 +195,16 @@ class TestContext(
 }
 
 object ResourceManager {
+  /** Create a ResourceManager with port range from environment variables.
+    * BOOKTEST_PORT_BASE: starting port (default 10000)
+    * BOOKTEST_PORT_MAX: maximum port (default 60000)
+    */
+  def fromEnv(): ResourceManager = {
+    val base = sys.env.get("BOOKTEST_PORT_BASE").map(_.toInt).getOrElse(10000)
+    val max = sys.env.get("BOOKTEST_PORT_MAX").map(_.toInt).getOrElse(60000)
+    new ResourceManager(new PortPool(base, max))
+  }
+
   /** Global default resource manager */
-  lazy val default: ResourceManager = new ResourceManager()
+  lazy val default: ResourceManager = fromEnv()
 }

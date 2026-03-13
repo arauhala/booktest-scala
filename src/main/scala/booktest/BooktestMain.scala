@@ -21,6 +21,7 @@ object BooktestMain {
     var threads = 1  // -p N: number of threads for parallel execution
     var garbageMode = false  // --garbage: list orphan files
     var cleanMode = false  // --clean: remove orphan files and temp directories
+    var rootOverride: Option[String] = None  // --root: package prefix to strip from paths
     val testClasses = scala.collection.mutable.ListBuffer[String]()
     
     var i = 0
@@ -80,6 +81,9 @@ object BooktestMain {
         case "--snapshot-dir" =>
           i += 1
           if (i < args.length) snapshotDir = args(i)
+        case "--root" =>
+          i += 1
+          if (i < args.length) rootOverride = Some(args(i))
         case "--test-filter" | "-t" =>
           i += 1
           if (i < args.length) testFilter = Some(args(i))
@@ -95,8 +99,11 @@ object BooktestMain {
       i += 1
     }
     
-    // Load booktest.conf if present
-    val booktestConfig = BooktestConfig.load().getOrElse(BooktestConfig.empty)
+    // Load booktest.conf if present, with optional --root override
+    val booktestConfig = {
+      val loaded = BooktestConfig.load().getOrElse(BooktestConfig.empty)
+      rootOverride.map(r => loaded.copy(root = Some(r))).getOrElse(loaded)
+    }
 
     // Use books-path from config if not overridden
     if (outputDir == "books" && booktestConfig.booksPath != "books") {
@@ -105,8 +112,8 @@ object BooktestMain {
     }
 
     val config = RunConfig(
-      outputDir = os.pwd / outputDir,
-      snapshotDir = os.pwd / snapshotDir,
+      outputDir = os.pwd / os.RelPath(outputDir),
+      snapshotDir = os.pwd / os.RelPath(snapshotDir),
       verbose = verbose,
       interactive = interactive,
       testFilter = testFilter,
