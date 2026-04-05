@@ -80,6 +80,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       resourceManager = Some(resourceManager)
     )
     testRun.setFlags(config.recaptureAll, config.updateSnapshots)
+    testRun.start()
 
     // Clear temp directory from previous runs (tmp files persist for dependent tests but are cleared on re-run)
     testRun.clearTmpDir()
@@ -124,6 +125,9 @@ class TestRunner(config: RunConfig = RunConfig()) {
       val endTime = System.currentTimeMillis()
       val duration = endTime - startTime
 
+      // Finalize output (flush remaining content, close files)
+      testRun.end()
+
       val snapshotResult = SnapshotManager.compareTest(testRun, config.diffMode)
 
       // Check if test explicitly failed via t.fail()
@@ -132,6 +136,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
         snapshotResult.copy(
           testName = fullTestName,
           passed = false,
+          successState = SuccessState.FAIL,
           diff = Some(s"Test explicitly failed$failMsg"),
           returnValue = Some(returnValue),
           durationMs = duration
@@ -143,7 +148,6 @@ class TestRunner(config: RunConfig = RunConfig()) {
           durationMs = duration
         )
       }
-      testRun.writeOutput()
 
       // Stop log capture (writes to log file)
       logCapture.stop()
@@ -212,6 +216,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
     } catch {
       case e: Exception =>
+        // Finalize output on error
+        testRun.end()
         // Stop log capture on error
         logCapture.stop()
 
@@ -776,6 +782,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       resourceManager = Some(resourceManager)
     )
     testRun.setFlags(config.recaptureAll, config.updateSnapshots)
+    testRun.start()
     testRun.clearTmpDir()
 
     val startTime = System.currentTimeMillis()
@@ -807,6 +814,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       val endTime = System.currentTimeMillis()
       val duration = endTime - startTime
 
+      testRun.end()
       val snapshotResult = SnapshotManager.compareTest(testRun, config.diffMode)
 
       val result = if (testRun.isFailed) {
@@ -814,6 +822,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
         snapshotResult.copy(
           testName = fullTestName,
           passed = false,
+          successState = SuccessState.FAIL,
           diff = Some(s"Test explicitly failed$failMsg"),
           returnValue = Some(returnValue),
           durationMs = duration
@@ -826,7 +835,6 @@ class TestRunner(config: RunConfig = RunConfig()) {
         )
       }
 
-      testRun.writeOutput()
       logCapture.stop()
       testRun.writeReport(s"Test '${testCase.name}' completed in ${duration}ms")
 
@@ -843,6 +851,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
     } catch {
       case e: Exception =>
+        testRun.end()
         logCapture.stop()
         val endTime = System.currentTimeMillis()
         val duration = endTime - startTime

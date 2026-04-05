@@ -1,6 +1,7 @@
 package booktest
 
 import os.Path
+import java.io.{BufferedReader, FileReader, PrintWriter, BufferedWriter, FileWriter}
 
 class TestCaseRun(
   val testName: String,
@@ -10,12 +11,38 @@ class TestCaseRun(
   val outDir: Path,         // books/.out/<suite>/
   private val resourceManager: Option[ResourceManager] = None
 ) {
-  private val outputBuffer = new StringBuilder
-  private val testBuffer = new StringBuilder  // test-only content (no info lines)
-  private val infoBuffer = new StringBuilder
+  // --- Output state ---
+  private var outLine = ""                  // Current line being built
+  private val outputBuffer = new StringBuilder  // Full output (for getOutput/getTestOutput)
   private var lineNumber = 0
   private var _failed = false
   private var _failMessage: Option[String] = None
+
+  // --- Line markers (token-level diff tracking) ---
+  // Each marker is (startPos, endPos, markerType) within the current line
+  private var lineMarkers = List.empty[(Int, Int, String)]
+  private var lineDiff: Option[Int] = None   // Position of first diff on current line
+  private var lineError: Option[Int] = None  // Position of first error on current line
+
+  // --- Statistics (like Python booktest) ---
+  private var _diffs = 0       // Lines with test-content differences
+  private var _errors = 0      // Lines with fail markers
+  private var _infoDiffs = 0   // Lines with info-only differences
+
+  def diffs: Int = _diffs
+  def errors: Int = _errors
+  def infoDiffs: Int = _infoDiffs
+
+  // --- Snapshot reader state ---
+  private var expReader: BufferedReader = _
+  private var expLine: String = _           // Current expected line (null if EOF/no snapshot)
+  private var expTokens: BufferIterator[String] = _  // Token iterator for current expected line
+  private var expLineNumber = 0
+  private var expFileExists = false
+
+  // --- Output file writer ---
+  private var outWriter: PrintWriter = _
+  private var _started = false
 
   // Test assets directory (for images, generated files)
   // Python style: books/<suite>/<test>/ for assets
@@ -54,70 +81,182 @@ class TestCaseRun(
     _updateSnapshots = updateSnapshots
   }
 
-  // Snapshot reader state - tokenized view of existing snapshot
-  private lazy val snapshotTokens: Array[String] = {
-    if (os.exists(snapshotFile)) {
-      val content = os.read(snapshotFile)
-      // Tokenize by whitespace only - keeps identifiers like "p99_latency" intact
-      content.split("\\s+").filter(_.nonEmpty)
-    } else {
-      Array.empty
-    }
-  }
-  private var snapshotTokenIndex = 0
-
   // Pattern for standalone numbers (not part of identifiers like p99_latency)
   private val StandaloneNumberPattern = """^-?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$""".r
-  
+
   val outputFile: Path = outputDir / s"$testName.md"
   val snapshotFile: Path = snapshotDir / s"$testName.md"
   val outFile: Path = outDir / s"$testName.md"  // Results written here first
   val reportFile: Path = outDir / s"$testName.txt"  // Test reports
   val logFile: Path = outDir / s"$testName.log"  // Test logs
-  
-  def h1(title: String): TestCaseRun = {
-    header(s"# $title")
+
+  // --- Lifecycle methods ---
+
+  /** Initialize output file and snapshot reader. Called by TestRunner before test execution. */
+  def start(): Unit = {
+    if (_started) return
+    _started = true
+
+    // Open output file for incremental writing
+    os.makeDir.all(outFile / os.up)
+    outWriter = new PrintWriter(new BufferedWriter(new FileWriter(outFile.toIO)))
+
+    // Open snapshot reader
+    resetExpReader()
+  }
+
+  /** Finalize output. Called by TestRunner after test execution. */
+  def end(): Unit = {
+    // Flush any remaining content on current line
+    if (outLine.nonEmpty) {
+      writeLine()
+    }
+    // Close output file
+    if (outWriter != null) {
+      outWriter.close()
+      outWriter = null
+    }
+    // Close snapshot reader
+    closeExpReader()
+  }
+
+  // --- Snapshot reader methods ---
+
+  /** Reset the snapshot file reader to beginning */
+  private def resetExpReader(): Unit = {
+    closeExpReader()
+    expFileExists = os.exists(snapshotFile)
+    if (expFileExists) {
+      expReader = new BufferedReader(new FileReader(snapshotFile.toIO))
+      expLine = null
+      expTokens = null
+      expLineNumber = 0
+      nextExpLine()
+    }
+  }
+
+  /** Close the snapshot reader */
+  private def closeExpReader(): Unit = {
+    if (expReader != null) {
+      expReader.close()
+      expReader = null
+    }
+    expLine = null
+    expTokens = null
+  }
+
+  /** Advance snapshot to next line */
+  private def nextExpLine(): Unit = {
+    if (expReader == null) {
+      expLine = null
+      expTokens = null
+      return
+    }
+    val line = expReader.readLine()
+    if (line == null) {
+      // EOF
+      closeExpReader()
+      expLine = null
+      expTokens = null
+    } else {
+      expLineNumber += 1
+      expLine = line
+      expTokens = new BufferIterator[String](new TestTokenizer(expLine))
+    }
+  }
+
+  /** Peek at next expected token without consuming it */
+  def headExpToken: Option[String] = {
+    if (expTokens != null && expTokens.hasNext) {
+      expTokens.head
+    } else if (expLine != null) {
+      // End of tokens on this line → next token is newline
+      Some("\n")
+    } else {
+      None
+    }
+  }
+
+  /** Get next expected token and advance cursor */
+  def nextExpToken: Option[String] = {
+    if (expTokens != null && expTokens.hasNext) {
+      Some(expTokens.next())
+    } else if (expLine != null) {
+      Some("\n")
+    } else {
+      None
+    }
   }
   
-  def h2(title: String): TestCaseRun = {
-    header(s"## $title")
-  }
-  
-  def h3(title: String): TestCaseRun = {
-    header(s"### $title")
-  }
-  
+  def h1(title: String): TestCaseRun = header(s"# $title")
+  def h2(title: String): TestCaseRun = header(s"## $title")
+  def h3(title: String): TestCaseRun = header(s"### $title")
+  def h4(title: String): TestCaseRun = header(s"#### $title")
+  def h5(title: String): TestCaseRun = header(s"##### $title")
+
   def tln: TestCaseRun = tln("")
 
   def tln(text: String = ""): TestCaseRun = {
-    testFeed(text)
-    testFeed("\n")
+    t(text)
+    t("\n")
     this
   }
-  
+
   def t(text: String): TestCaseRun = {
+    ensureStarted()
     testFeed(text)
     this
   }
-  
+
   def i(text: String): TestCaseRun = {
+    ensureStarted()
     infoFeed(text)
     this
   }
-  
+
   def iln: TestCaseRun = iln("")
 
   def iln(text: String = ""): TestCaseRun = {
-    infoFeed(text)
-    infoFeed("\n")
+    i(text)
+    i("\n")
+    this
+  }
+
+  /** Write fail content (always marks test as failed, included in snapshot) */
+  def f(text: String): TestCaseRun = {
+    ensureStarted()
+    failFeed(text)
+    this
+  }
+
+  def fln: TestCaseRun = fln("")
+
+  def fln(text: String = ""): TestCaseRun = {
+    f(text)
+    f("\n")
+    this
+  }
+
+  /** Mark current line as having a diff (entire line) */
+  def diff(): TestCaseRun = {
+    lineMarkers = lineMarkers :+ (0, 999999, "diff")
+    if (lineDiff.isEmpty) lineDiff = Some(outLine.length)
+    this
+  }
+
+  /** Mark current line as failed (entire line) */
+  def fail(): TestCaseRun = {
+    lineMarkers = lineMarkers :+ (0, 999999, "fail")
+    if (lineError.isEmpty) lineError = Some(outLine.length)
+    _failed = true
     this
   }
 
   /** Mark the test as failed without throwing an exception */
-  def fail(message: String = ""): TestCaseRun = {
+  def fail(message: String): TestCaseRun = {
     _failed = true
     _failMessage = if (message.nonEmpty) Some(message) else None
-    this
+    fail()
   }
 
   /** Check if test has been marked as failed */
@@ -263,8 +402,11 @@ class TestCaseRun(
       return this
     }
 
+    // Write label first (consumes label tokens from snapshot stream)
+    t(s"$label: ")
+    // Now peek at the next token which should be the number
     val oldValueOpt = peekDouble
-    tmetricInternal(label, value, tolerance, direction, oldValueOpt)
+    tmetricInternal(value, tolerance, direction, oldValueOpt)
   }
 
   /** Output a metric with percentage-based tolerance.
@@ -282,15 +424,17 @@ class TestCaseRun(
       return this
     }
 
-    // Get old value (consumes one token)
+    // Write label first (consumes label tokens from snapshot stream)
+    t(s"$label: ")
+    // Now peek at the next token which should be the number
     val oldValueOpt = peekDouble
     val tolerance = oldValueOpt.map(old => math.abs(old) * tolerancePct / 100.0).getOrElse(0.0)
-    // Use internal tmetric that doesn't consume another token
-    tmetricInternal(label, value, tolerance, direction, oldValueOpt)
+    tmetricInternal(value, tolerance, direction, oldValueOpt)
   }
 
-  /** Internal tmetric implementation that accepts pre-fetched old value */
-  private def tmetricInternal(label: String, value: Double, tolerance: Double,
+  /** Internal tmetric implementation that accepts pre-fetched old value.
+    * Label is already written; this writes the value and newline. */
+  private def tmetricInternal(value: Double, tolerance: Double,
                               direction: Option[String], oldValueOpt: Option[Double]): TestCaseRun = {
     // Check direction constraint
     val directionViolation = (direction, oldValueOpt) match {
@@ -314,12 +458,13 @@ class TestCaseRun(
     }
 
     val warning = directionViolation.getOrElse("")
-    tln(String.format(java.util.Locale.US, "%s: %.4f%s", label, outputValue: java.lang.Double, warning))
+    // Label is already written by caller; just write value + warning + newline
+    tln(String.format(java.util.Locale.US, "%.4f%s", outputValue: java.lang.Double, warning))
 
     // Mark as failed if direction constraint violated
     directionViolation.foreach { msg =>
       _failed = true
-      _failMessage = Some(s"$label$msg")
+      _failMessage = Some(msg)
     }
 
     this
@@ -916,101 +1061,247 @@ class TestCaseRun(
     }
   }
 
-  /** Peek at next token in snapshot, try to parse as Double */
+  /** Peek at next expected token in snapshot, try to parse as Double.
+    * Scans forward through tokens to find the next number. */
   def peekDouble: Option[Double] = {
     findNextNumber.flatMap { token =>
-      try {
-        Some(token.toDouble)
-      } catch {
-        case _: NumberFormatException => None
-      }
+      try Some(token.toDouble)
+      catch { case _: NumberFormatException => None }
     }
   }
 
-  /** Peek at next token in snapshot, try to parse as Long */
+  /** Peek at next expected token in snapshot, try to parse as Long */
   def peekLong: Option[Long] = {
     findNextNumber.flatMap { token =>
-      try {
-        Some(token.toLong)
-      } catch {
-        case _: NumberFormatException => None
-      }
+      try Some(token.toLong)
+      catch { case _: NumberFormatException => None }
     }
   }
 
-  /** Peek at next token in snapshot as String */
-  def peekToken: Option[String] = {
-    if (snapshotTokenIndex < snapshotTokens.length) {
-      Some(snapshotTokens(snapshotTokenIndex))
-    } else {
-      None
-    }
-  }
+  /** Peek at next expected token in snapshot as String */
+  def peekToken: Option[String] = headExpToken
 
-  /** Skip to next token in snapshot */
-  def skipToken(): Unit = {
-    if (snapshotTokenIndex < snapshotTokens.length) {
-      snapshotTokenIndex += 1
-    }
-  }
+  /** Skip to next expected token in snapshot */
+  def skipToken(): Unit = { nextExpToken }
 
-  /** Find next numeric token in snapshot (advances index).
-    * Only matches standalone numbers, not numbers embedded in identifiers like "p99_latency".
-    */
+  /** Find next numeric token in snapshot by scanning ahead WITHOUT consuming tokens.
+    * Re-tokenizes the current expected line to peek without affecting the main token stream. */
   private def findNextNumber: Option[String] = {
-    while (snapshotTokenIndex < snapshotTokens.length) {
-      val token = snapshotTokens(snapshotTokenIndex)
-      snapshotTokenIndex += 1
-      // Check if it's a standalone number (not part of an identifier)
-      // Use findFirstIn for Scala 2.12 compatibility
+    if (expLine == null) return None
+    // Re-tokenize the full expected line to scan for numbers without consuming main tokens
+    val tokens = new TestTokenizer(expLine)
+    while (tokens.hasNext) {
+      val token = tokens.next()
       if (StandaloneNumberPattern.findFirstIn(token).exists(_ == token)) {
-        try {
-          token.toDouble // validate it's a valid number
-          return Some(token)
-        } catch {
-          case _: NumberFormatException => // continue searching
-        }
+        return Some(token)
       }
     }
     None
   }
 
+  /** Ensure start() has been called (auto-start for backward compatibility) */
+  private def ensureStarted(): Unit = {
+    if (!_started) start()
+  }
+
+  // --- Header with anchor support ---
+
   private def header(headerText: String): TestCaseRun = {
-    // Only add leading newline if there's already content (avoid extra blank line at start)
-    if (testBuffer.nonEmpty) {
-      testFeed("\n")
+    ensureStarted()
+    // Add leading newline if there's already content (before seeking)
+    if (outputBuffer.nonEmpty) {
+      infoFeedToken("\n")
     }
+    // Seek to matching line in snapshot (non-linear matching like Python booktest)
+    seekLine(headerText)
+    // Write header as tested content
     testFeed(headerText)
-    testFeed("\n\n")
+    testFeedToken("\n")
+    // Blank line after header
+    infoFeedToken("\n")
     this
   }
-  
+
+  // --- Anchor/seek system for non-linear snapshot matching ---
+
+  /** Seek snapshot cursor to a line matching the predicate.
+    * Scans forward from current position, wraps around if not found. */
+  def seek(isLineOk: String => Boolean, begin: Int = 0, end: Int = Int.MaxValue): Unit = {
+    if (expLine == null) return  // No snapshot
+
+    val atLineNumber = expLineNumber
+    // Scan forward
+    while (expLine != null && !isLineOk(expLine) && expLineNumber < end) {
+      nextExpLine()
+    }
+    // If not found forward and we didn't start from beginning, wrap around
+    if ((expLine == null || !isLineOk(expLine)) && atLineNumber > begin) {
+      resetExpReader()
+      // Scan from beginning to where we started
+      while (expLine != null && !isLineOk(expLine) && expLineNumber < atLineNumber) {
+        nextExpLine()
+      }
+    }
+  }
+
+  /** Seek to exact line match in snapshot */
+  def seekLine(anchor: String): Unit = {
+    seek(line => line == anchor)
+  }
+
+  /** Seek to line starting with prefix in snapshot */
+  def seekPrefix(prefix: String): Unit = {
+    seek(line => line != null && line.startsWith(prefix))
+  }
+
+  /** Jump snapshot cursor to specific line number */
+  def jump(targetLine: Int): Unit = {
+    if (targetLine < expLineNumber) {
+      resetExpReader()
+    }
+    while (expLine != null && expLineNumber < targetLine) {
+      nextExpLine()
+    }
+  }
+
+  /** Seek to prefix in snapshot, then write as tested content */
+  def anchor(prefix: String): TestCaseRun = {
+    seekPrefix(prefix)
+    t(prefix)
+  }
+
+  /** Seek to exact line in snapshot, then write as tested content with newline */
+  def anchorln(line: String): TestCaseRun = {
+    seekLine(line)
+    tln(line)
+  }
+
+  // --- Token-by-token feed system ---
+
+  /** Core token feeding: compare against snapshot and build output line.
+    * @param token The token to feed
+    * @param check If true, differences are marked as 'diff' (test failure)
+    * @param infoCheck If true, differences are marked as 'info' (noted but no failure)
+    */
+  private def feedToken(token: String, check: Boolean = false, infoCheck: Boolean = false): Unit = {
+    val expToken = nextExpToken
+
+    if (token == "\n") {
+      commitLine()
+    } else {
+      val startPos = outLine.length
+      outLine = outLine + token
+
+      if (expFileExists && expToken.isDefined && token != expToken.get) {
+        if (check) {
+          lineMarkers = lineMarkers :+ (startPos, outLine.length, "diff")
+          if (lineDiff.isEmpty) lineDiff = Some(startPos)
+        } else if (infoCheck) {
+          lineMarkers = lineMarkers :+ (startPos, outLine.length, "info")
+        }
+      } else if (expFileExists && expToken.isEmpty && check) {
+        // Beyond end of snapshot — new test content
+        lineMarkers = lineMarkers :+ (startPos, outLine.length, "diff")
+        if (lineDiff.isEmpty) lineDiff = Some(startPos)
+      }
+    }
+  }
+
+  private def testFeedToken(token: String): Unit = feedToken(token, check = true)
+  private def infoFeedToken(token: String): Unit = feedToken(token, infoCheck = true)
+  private def failFeedToken(token: String): Unit = {
+    val startPos = outLine.length
+    feedToken(token, check = false)
+    val endPos = outLine.length
+    if (token != "\n") {
+      lineMarkers = lineMarkers :+ (startPos, endPos, "fail")
+      if (lineError.isEmpty) lineError = Some(startPos)
+    }
+  }
+
+  /** Tokenize text and feed each token as test content */
   private def testFeed(text: String): Unit = {
-    outputBuffer.append(text)
-    testBuffer.append(text)
-    if (text == "\n") {
-      lineNumber += 1
+    val tokenizer = new TestTokenizer(text)
+    while (tokenizer.hasNext) {
+      testFeedToken(tokenizer.next())
     }
   }
 
+  /** Tokenize text and feed each token as info content */
   private def infoFeed(text: String): Unit = {
-    infoBuffer.append(text)
-    outputBuffer.append(text)
-    if (text == "\n") {
-      lineNumber += 1
+    val tokenizer = new TestTokenizer(text)
+    while (tokenizer.hasNext) {
+      infoFeedToken(tokenizer.next())
     }
   }
 
-  /** Get full output including both test and info content (for display/logging) */
+  /** Tokenize text and feed each token as fail content */
+  private def failFeed(text: String): Unit = {
+    _failed = true
+    val tokenizer = new TestTokenizer(text)
+    while (tokenizer.hasNext) {
+      failFeedToken(tokenizer.next())
+    }
+  }
+
+  // --- Line commit system ---
+
+  /** Flush current line: update stats, write to output file, advance snapshot */
+  private def commitLine(): Unit = {
+    val hasMarkers = lineMarkers.nonEmpty
+    val hasLineMarkers = lineError.isDefined || lineDiff.isDefined
+
+    if (hasMarkers || hasLineMarkers) {
+      // Determine what kind of markers we have
+      val hasError = lineError.isDefined || lineMarkers.exists(_._3 == "fail")
+      val hasDiff = lineDiff.isDefined || lineMarkers.exists(_._3 == "diff")
+      val hasInfo = lineMarkers.exists(_._3 == "info")
+
+      if (hasError) {
+        _errors += 1
+      } else if (hasDiff) {
+        _diffs += 1
+      } else if (hasInfo) {
+        _infoDiffs += 1
+      }
+    }
+
+    writeLine()
+
+    // Clear line state
+    lineMarkers = List.empty
+    lineDiff = None
+    lineError = None
+  }
+
+  /** Write current line to output file and advance snapshot */
+  private def writeLine(): Unit = {
+    outputBuffer.append(outLine)
+    outputBuffer.append("\n")
+    if (outWriter != null) {
+      outWriter.println(outLine)
+      outWriter.flush()
+    }
+    outLine = ""
+    nextExpLine()
+    lineNumber += 1
+  }
+
+  /** Get full output including all content */
   def getOutput: String = outputBuffer.toString
 
-  /** Get test-only output excluding info lines (for snapshot comparison) */
-  def getTestOutput: String = testBuffer.toString
-  
+  /** Get full output — same as getOutput. All feeds write to snapshot. */
+  def getTestOutput: String = outputBuffer.toString
+
+  /** Write output is now handled incrementally via start()/end().
+    * This method is kept for backward compatibility but is a no-op if start() was called. */
   def writeOutput(): Unit = {
-    // Write test-only output to .out directory (this is what becomes the snapshot)
-    os.makeDir.all(outFile / os.up)
-    os.write.over(outFile, getTestOutput)
+    if (!_started) {
+      // Legacy path: write buffer to file
+      os.makeDir.all(outFile / os.up)
+      os.write.over(outFile, getOutput)
+    }
+    // If started, output was written incrementally — nothing to do
   }
   
   def writeReport(message: String): Unit = {
@@ -1036,11 +1327,9 @@ class TestCaseRun(
     }
   }
   
+  /** Check if test output matches snapshot (based on token comparison stats) */
   def compareWithSnapshot(): Boolean = {
-    getSnapshot match {
-      case Some(snapshot) => snapshot.trim == getTestOutput.trim
-      case None => false
-    }
+    _errors == 0 && _diffs == 0 && !_failed
   }
 
   // -- Port management (delegates to ResourceManager's PortPool) --
