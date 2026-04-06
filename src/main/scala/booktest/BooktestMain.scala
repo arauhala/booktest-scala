@@ -225,7 +225,8 @@ object BooktestMain {
       // Review mode - review previous test results without re-running
       val runner = new TestRunner(config)
       val exitCode = runner.reviewResults(suites)
-      sys.exit(exitCode)
+      if (exitCode != 0) sys.exit(exitCode)
+      return
     }
 
     if (garbageMode || cleanMode) {
