@@ -1,5 +1,5 @@
 # Metrics with Absolute Tolerance
 
-accuracy: 0.9569
-precision: 0.9204
-recall: 0.8913
+accuracy: 0.9510
+precision: 0.9161
+recall: 0.8971

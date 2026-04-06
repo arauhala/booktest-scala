@@ -11,4 +11,6 @@ auc_roc: 0.9678
 
 ## Performance Metrics
 
+inference_time_ms: 12.5000
+memory_mb: 256.0000
 Evaluation complete

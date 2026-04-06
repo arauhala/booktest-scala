@@ -1,5 +1,10 @@
 package booktest
 
+/** Thrown to signal test failure without killing the JVM.
+  * SBT's runner.run() catches exceptions and reports them as task failures.
+  * This avoids sys.exit() which kills the SBT server during development. */
+class BooktestFailure(message: String) extends RuntimeException(message)
+
 object BooktestMain {
 
   def main(args: Array[String]): Unit = {
@@ -94,7 +99,7 @@ object BooktestMain {
           testClasses += arg
         case _ =>
           println(s"Unknown option: ${args(i)}")
-          sys.exit(1)
+          throw new BooktestFailure("Unknown option")
       }
       i += 1
     }
@@ -139,7 +144,7 @@ object BooktestMain {
         case None =>
           println("No tests specified. Configure 'default' in booktest.conf")
           println("Or specify test path as argument (e.g., 'booktest examples')")
-          sys.exit(1)
+          throw new BooktestFailure("No tests specified")
       }
     } else {
       // Has arguments - resolve each one
@@ -180,8 +185,7 @@ object BooktestMain {
     }
     
     if (suites.isEmpty) {
-      println("No valid test suites found.")
-      sys.exit(1)
+      throw new BooktestFailure("No valid test suites found.")
     }
     
     if (listTests) {
@@ -225,7 +229,8 @@ object BooktestMain {
       // Review mode - review previous test results without re-running
       val runner = new TestRunner(config)
       val exitCode = runner.reviewResults(suites)
-      sys.exit(exitCode)
+      if (exitCode != 0) throw new BooktestFailure("Review found unresolved diffs")
+      return
     }
 
     if (garbageMode || cleanMode) {
@@ -279,7 +284,7 @@ object BooktestMain {
     println(result.summary)
     
     if (!result.success) {
-      sys.exit(1)
+      throw new BooktestFailure(s"${result.failedTests}/${result.totalTests} test failed")
     }
   }
   

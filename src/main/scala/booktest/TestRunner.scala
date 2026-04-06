@@ -80,6 +80,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       resourceManager = Some(resourceManager)
     )
     testRun.setFlags(config.recaptureAll, config.updateSnapshots)
+    testRun.start()
 
     // Clear temp directory from previous runs (tmp files persist for dependent tests but are cleared on re-run)
     testRun.clearTmpDir()
@@ -124,6 +125,9 @@ class TestRunner(config: RunConfig = RunConfig()) {
       val endTime = System.currentTimeMillis()
       val duration = endTime - startTime
 
+      // Finalize output (flush remaining content, close files)
+      testRun.end()
+
       val snapshotResult = SnapshotManager.compareTest(testRun, config.diffMode)
 
       // Check if test explicitly failed via t.fail()
@@ -132,6 +136,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
         snapshotResult.copy(
           testName = fullTestName,
           passed = false,
+          successState = SuccessState.FAIL,
           diff = Some(s"Test explicitly failed$failMsg"),
           returnValue = Some(returnValue),
           durationMs = duration
@@ -143,7 +148,6 @@ class TestRunner(config: RunConfig = RunConfig()) {
           durationMs = duration
         )
       }
-      testRun.writeOutput()
 
       // Stop log capture (writes to log file)
       logCapture.stop()
@@ -212,6 +216,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
     } catch {
       case e: Exception =>
+        // Finalize output on error
+        testRun.end()
         // Stop log capture on error
         logCapture.stop()
 
@@ -502,63 +508,128 @@ class TestRunner(config: RunConfig = RunConfig()) {
     }
   }
 
+  /** Review previous test results without re-running tests.
+    * Like Python booktest's -w: reprints all results and offers interactive
+    * acceptance for diffs/failures, so you can examine results from a
+    * non-interactive run without waiting for tests to execute again.
+    */
   def reviewResults(suites: List[TestSuite]): Int = {
     val outDir = config.outputDir / ".out"
     val reports = CaseReports.fromDir(outDir)
-    
+
+    if (reports.cases.isEmpty) {
+      println("No previous test results found. Run tests first.")
+      return 1
+    }
+
     println()
     println("# Review Results:")
     println()
-    
-    var allAccepted = true
-    
-    reports.cases.foreach { caseReport =>
-      val parts = caseReport.testName.split("/")
-      if (parts.length >= 2) {
-        val suiteName = parts(0)
-        val testName = parts(1)
-        
-        val outFile = outDir / suiteName / s"$testName.md"
-        val snapshotFile = config.snapshotDir / suiteName / s"$testName.md"
-        
+
+    var totalPassed = 0
+    var totalFailed = 0
+    var accepted = 0
+    var quit = false
+
+    reports.cases.takeWhile(_ => !quit).foreach { caseReport =>
+      // Resolve paths: test name is like "examples/ExampleTests/hello"
+      // The .out file is at books/.out/examples/ExampleTests/hello.md
+      // The snapshot is at books/examples/ExampleTests/hello.md
+      val testRelPath = os.RelPath(caseReport.testName)
+      val outFile = outDir / testRelPath / os.up / s"${testRelPath.last}.md"
+      val snapshotFile = config.snapshotDir / testRelPath / os.up / s"${testRelPath.last}.md"
+      val logFile = outDir / testRelPath / os.up / s"${testRelPath.last}.log"
+
+      val hasDiff = os.exists(outFile) && {
+        val output = os.read(outFile)
+        val snapshot = if (os.exists(snapshotFile)) Some(os.read(snapshotFile)) else None
+        !snapshot.exists(_ == output)
+      }
+
+      val isPassed = caseReport.result == "OK" && !hasDiff
+
+      if (isPassed) {
+        // Show passed tests in compact form
+        if (config.verbose) {
+          println(s"  ${caseReport.testName}..${LightGreen("ok")} ${caseReport.durationMs} ms")
+        } else {
+          println(s"  ${caseReport.testName}..${LightGreen("ok")} ${caseReport.durationMs} ms")
+        }
+        totalPassed += 1
+      } else {
+        // Show failed/diff test with details
+        val statusColor = if (caseReport.result == "FAIL") LightRed("FAIL") else LightRed("DIFF")
+        println(s"  ${caseReport.testName}..$statusColor ${caseReport.durationMs} ms")
+
+        // Show diff if output file exists
         if (os.exists(outFile)) {
           val output = os.read(outFile)
-          val hasSnapshot = os.exists(snapshotFile)
-          val snapshot = if (hasSnapshot) Some(os.read(snapshotFile)) else None
-          
-          val passed = snapshot.exists(_ == output)
-          
-          if (!passed) {
-            println(s"${caseReport.testName} - ${caseReport.result}")
-            
-            if (config.interactive) {
-              print("Accept changes? (y/N): ")
-              val input = scala.io.StdIn.readLine()
-              if (input != null && input.toLowerCase == "y") {
-                // Accept the snapshot
-                os.makeDir.all(snapshotFile / os.up)
-                os.copy.over(outFile, snapshotFile)
-                println("Changes accepted.")
-              } else {
-                allAccepted = false
-                println("Changes rejected.")
-              }
-            } else {
-              allAccepted = false
-              if (hasSnapshot) {
-                val diff = SnapshotManager.generateDiff(snapshot.get, output)
-                println(diff)
-              } else {
-                println("No snapshot found - new test")
-              }
-            }
+          val snapshot = if (os.exists(snapshotFile)) Some(os.read(snapshotFile)) else None
+
+          // Show verbose output content
+          if (config.verbose) {
+            println()
+            output.linesIterator.foreach(line => println(s"  $line"))
             println()
           }
+
+          // Show diff
+          snapshot match {
+            case Some(snap) if snap != output =>
+              val diff = SnapshotManager.generateDiff(snap, output)
+              println(diff)
+              println()
+            case None =>
+              println(s"  No snapshot found for test '${caseReport.testName}'")
+              println()
+            case _ => // snapshot matches but result was FAIL (explicit failure)
+              println()
+          }
+
+          // Interactive acceptance
+          if (config.interactive && !quit) {
+            var validInput = false
+            while (!validInput && !quit) {
+              print(s"  ${LightYellow("(a)ccept, (c)ontinue, (q)uit:")} ")
+              val input = scala.io.StdIn.readLine()
+              if (input == null) {
+                quit = true
+              } else {
+                input.trim.toLowerCase match {
+                  case "a" | "accept" =>
+                    // Accept: copy .out file to snapshot location
+                    os.makeDir.all(snapshotFile / os.up)
+                    os.copy.over(outFile, snapshotFile)
+                    println(s"  ${LightGreen("Changes accepted.")}")
+                    accepted += 1
+                    validInput = true
+                  case "c" | "continue" =>
+                    validInput = true
+                  case "q" | "quit" =>
+                    quit = true
+                  case _ =>
+                    println(s"  ${LightRed("Invalid input.")}")
+                }
+              }
+            }
+          }
         }
+        totalFailed += 1
       }
     }
-    
-    if (allAccepted) 0 else 1
+
+    println()
+    val summary = if (totalFailed == 0) {
+      LightGreen(s"$totalPassed/${totalPassed + totalFailed} test passed").toString
+    } else {
+      s"${LightRed(s"$totalFailed/${totalPassed + totalFailed} test failed")}" +
+        (if (accepted > 0) s" ($accepted accepted)" else "")
+    }
+    println(summary)
+
+    if (totalFailed > 0 && totalFailed == accepted) 0
+    else if (totalFailed > 0) 1
+    else 0
   }
   
   private def resolveDependencyOrder(testCases: List[TestCase]): List[TestCase] = {
@@ -776,6 +847,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       resourceManager = Some(resourceManager)
     )
     testRun.setFlags(config.recaptureAll, config.updateSnapshots)
+    testRun.start()
     testRun.clearTmpDir()
 
     val startTime = System.currentTimeMillis()
@@ -807,6 +879,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       val endTime = System.currentTimeMillis()
       val duration = endTime - startTime
 
+      testRun.end()
       val snapshotResult = SnapshotManager.compareTest(testRun, config.diffMode)
 
       val result = if (testRun.isFailed) {
@@ -814,6 +887,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
         snapshotResult.copy(
           testName = fullTestName,
           passed = false,
+          successState = SuccessState.FAIL,
           diff = Some(s"Test explicitly failed$failMsg"),
           returnValue = Some(returnValue),
           durationMs = duration
@@ -826,7 +900,6 @@ class TestRunner(config: RunConfig = RunConfig()) {
         )
       }
 
-      testRun.writeOutput()
       logCapture.stop()
       testRun.writeReport(s"Test '${testCase.name}' completed in ${duration}ms")
 
@@ -843,6 +916,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
     } catch {
       case e: Exception =>
+        testRun.end()
         logCapture.stop()
         val endTime = System.currentTimeMillis()
         val duration = endTime - startTime

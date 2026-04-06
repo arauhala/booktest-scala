@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.3.2 (2026-04-06)
+
+### Breaking changes
+
+- **Snapshot files now include info-line content.** All existing snapshots need
+  regeneration (`-S` flag). Previously `iln()` / `i()` output was excluded from
+  snapshot files entirely, making them unreadable for data science workflows
+  where diagnostic output is essential for review.
+- `TestResult` has a new `successState` field (`SuccessState.OK` / `DIFF` / `FAIL`).
+
+### Token-by-token snapshot comparison
+
+Replaces the line-by-line post-hoc comparison with Python booktest's
+token-by-token comparison that runs during test execution. Each token is
+compared as it is written, enabling precise diff/info/fail markers within a
+single output line. Info-only differences (`i()` / `iln()`) no longer cause
+test failure, matching Python booktest behavior.
+
+### Anchor/seek for non-linear snapshot matching
+
+Headers (`h1` .. `h5`) now seek to the matching line in the snapshot before
+writing, so inserting new sections between existing ones does not cascade false
+diffs across the rest of the file. Public API:
+
+- **`t.anchor(prefix)`** / **`t.anchorln(line)`**: Seek then write
+- **`t.seekLine(line)`** / **`t.seekPrefix(prefix)`**: Seek only
+- **`t.seek(predicate)`**: General-purpose snapshot cursor navigation
+- **`t.jump(lineNumber)`**: Absolute positioning
+
+### New methods
+
+- **`t.f(text)`** / **`t.fln(text)`**: Write fail content (always marks test
+  as failed, included in snapshot)
+- **`t.diff()`**: Mark current line as having a diff
+- **`t.fail()`**: Mark current line as failed (no-arg variant)
+- **`t.h4(title)`** / **`t.h5(title)`**: Level 4 and 5 headers
+
+### Other changes
+
+- `TestTokenizer`: Tokenizer matching Python booktest rules (whitespace,
+  numbers with sign/decimal/scientific notation, alphanumeric words, special
+  characters)
+- `SuccessState` enum separates snapshot-mismatch from test-logic failure,
+  matching Python's two-dimensional result model
+- `TestCaseRun` lifecycle: `start()` / `end()` methods for output file and
+  snapshot reader management
+- `findNextNumber` (used by `peekDouble` / `peekLong`) no longer consumes
+  the snapshot token stream
+
 ## 0.3.1 (2026-03-13)
 
 - **`--root` CLI flag**: Override package prefix stripping from the command line

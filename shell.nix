@@ -59,7 +59,5 @@ in
     pkgs.xz               # Compression
     pkgs.bzip2            # Compression
 
-    unstable.claude-code
-
   ];
 }).env
