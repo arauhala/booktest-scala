@@ -2,7 +2,11 @@ package booktest
 
 import os.Path
 import fansi.Color
-import fansi.Color.{LightRed, LightGreen, LightYellow, LightCyan, LightBlue}
+import fansi.Color.{LightRed, LightGreen, LightYellow, LightCyan}
+
+private[booktest] object Colors {
+  val Orange = Color.True(255, 165, 0)
+}
 
 case class RunConfig(
   outputDir: Path = os.pwd / "books",
@@ -183,7 +187,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
         if (result.passed) {
           println(s"$fullTestName ${LightGreen("ok")} ${duration} ms.")
         } else {
-          println(s"$fullTestName ${LightRed("DIFF")} ${duration} ms.")
+          println(s"$fullTestName ${Colors.Orange("DIFF")} ${duration} ms.")
           // Show diff inline in verbose mode
           result.diff.foreach { diff =>
             println()
@@ -197,7 +201,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
         if (result.passed) {
           println(s"${LightGreen("ok")} ${duration} ms")
         } else {
-          println(s"${LightRed("DIFF")} ${duration} ms")
+          println(s"${Colors.Orange("DIFF")} ${duration} ms")
         }
         false
       } else if (!result.passed) {
@@ -421,9 +425,22 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val suitePath = config.getSuitePath(fullClassName)
     val testCases = suite.testCases
 
-    // Step 1: Apply name pattern filter
+    // Step 1: Apply name pattern filter, but include transitive dependencies
     val filteredTests = config.testFilter match {
-      case Some(pattern) => testCases.filter(_.name.contains(pattern))
+      case Some(pattern) =>
+        val matched = testCases.filter(_.name.contains(pattern)).map(_.name).toSet
+        val testMap = testCases.map(tc => tc.name -> tc).toMap
+        val needed = scala.collection.mutable.LinkedHashSet[String]()
+        def collectDeps(name: String): Unit = {
+          if (!needed.contains(name)) {
+            testMap.get(name).foreach { tc =>
+              tc.dependencies.foreach(collectDeps)
+            }
+            needed += name
+          }
+        }
+        matched.foreach(collectDeps)
+        testCases.filter(tc => needed.contains(tc.name))
       case None => testCases
     }
 
@@ -558,7 +575,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
         totalPassed += 1
       } else {
         // Show failed/diff test with details
-        val statusColor = if (caseReport.result == "FAIL") LightRed("FAIL") else LightRed("DIFF")
+        val statusColor = if (caseReport.result == "FAIL") LightRed("FAIL") else Colors.Orange("DIFF")
         println(s"  ${caseReport.testName}..$statusColor ${caseReport.durationMs} ms")
 
         // Show diff if output file exists
@@ -777,7 +794,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
                 if (result.passed) {
                   println(s"${result.testName} ${LightGreen("ok")} ${result.durationMs} ms.")
                 } else {
-                  println(s"${result.testName} ${LightRed("DIFF")} ${result.durationMs} ms.")
+                  println(s"${result.testName} ${Colors.Orange("DIFF")} ${result.durationMs} ms.")
                   result.diff.foreach { diff =>
                     println()
                     println(diff)
@@ -789,7 +806,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
                 println(s"  ${result.testName}..${LightGreen("ok")} ${result.durationMs} ms")
                 result
               } else {
-                println(s"  ${result.testName}..${LightRed("DIFF")} ${result.durationMs} ms")
+                println(s"  ${result.testName}..${Colors.Orange("DIFF")} ${result.durationMs} ms")
                 result
               }
 
