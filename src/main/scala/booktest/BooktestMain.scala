@@ -152,34 +152,55 @@ object BooktestMain {
         // Normalize: convert slash format to dot format (examples/ImageTest -> examples.ImageTest)
         val arg = rawArg.replace('/', '.')
 
-        // Check if it's a group name first
-        booktestConfig.getGroup(arg) match {
-          case Some(packages) =>
-            // It's a group - discover all packages, apply exclude
-            val discovered = packages.flatMap(discoverTestSuites)
-            discovered.filterNot(s => booktestConfig.isExcluded(s.fullClassName))
-          case None =>
-            // Not a group - resolve as path relative to root
-            val fullPath = if (arg.startsWith(booktestConfig.root.getOrElse(""))) {
-              // Already a full path
-              arg
-            } else {
-              // Relative path - prepend root
-              booktestConfig.resolvePath(arg)
-            }
-            val discovered = discoverTestSuites(fullPath)
-            if (discovered.nonEmpty) {
-              // Don't apply exclude for explicit class names
-              if (discovered.length == 1) {
-                discovered
+        def resolveArg(a: String): List[TestSuite] = {
+          // Check if it's a group name first
+          booktestConfig.getGroup(a) match {
+            case Some(packages) =>
+              // It's a group - discover all packages, apply exclude
+              val discovered = packages.flatMap(discoverTestSuites)
+              discovered.filterNot(s => booktestConfig.isExcluded(s.fullClassName))
+            case None =>
+              // Not a group - resolve as path relative to root
+              val fullPath = if (a.startsWith(booktestConfig.root.getOrElse(""))) {
+                // Already a full path
+                a
               } else {
-                // Multiple matches (package) - apply exclude
-                discovered.filterNot(s => booktestConfig.isExcluded(s.fullClassName))
+                // Relative path - prepend root
+                booktestConfig.resolvePath(a)
               }
-            } else {
-              // Try as explicit class name - no exclude
-              loadTestSuite(fullPath).toList
-            }
+              val discovered = discoverTestSuites(fullPath)
+              if (discovered.nonEmpty) {
+                // Don't apply exclude for explicit class names
+                if (discovered.length == 1) {
+                  discovered
+                } else {
+                  // Multiple matches (package) - apply exclude
+                  discovered.filterNot(s => booktestConfig.isExcluded(s.fullClassName))
+                }
+              } else {
+                // Try as explicit class name - no exclude
+                loadTestSuite(fullPath).toList
+              }
+          }
+        }
+
+        val resolved = resolveArg(arg)
+        if (resolved.nonEmpty) {
+          resolved
+        } else if (arg.contains('.')) {
+          // Try SuiteName.testCase pattern: strip last component and use as test filter
+          val lastDot = arg.lastIndexOf('.')
+          val suitePart = arg.substring(0, lastDot)
+          val testPart = arg.substring(lastDot + 1)
+          val suiteResolved = resolveArg(suitePart)
+          if (suiteResolved.nonEmpty) {
+            testFilter = Some(testPart)
+            suiteResolved
+          } else {
+            Nil
+          }
+        } else {
+          Nil
         }
       }.toList
     }
