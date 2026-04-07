@@ -116,7 +116,7 @@ object BooktestMain {
       snapshotDir = booktestConfig.booksPath
     }
 
-    val config = RunConfig(
+    var config = RunConfig(
       outputDir = os.pwd / os.RelPath(outputDir),
       snapshotDir = os.pwd / os.RelPath(snapshotDir),
       verbose = verbose,
@@ -205,6 +205,11 @@ object BooktestMain {
       }.toList
     }
     
+    // Update config if testFilter was set during SuiteName/testCase resolution
+    if (testFilter != config.testFilter) {
+      config = config.copy(testFilter = testFilter)
+    }
+
     if (suites.isEmpty) {
       throw new BooktestFailure("No valid test suites found.")
     }
