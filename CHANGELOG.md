@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.3 (2026-04-07)
+
+- **Orange DIFF status**: DIFF results now shown in orange instead of red,
+  distinguishing them from FAIL (red). Matches Python booktest convention.
+- **Review mode (`-w`) rewritten**:
+  - Shows all results from previous run (names, status, durations)
+  - Test selection narrows review (e.g., `examples/TmpDirTest -w`)
+  - Trusts case report results instead of re-comparing files
+  - Verbose mode (`-v`) shows output content for all tests
+  - Interactive mode (`-i`) adds `(v)iew` and `(l)ogs` options
+- **SuiteName/testCase args**: Positional arg like `GroceryTest/prefill`
+  resolves as suite + test filter
+- **Dependency preservation in `-t` filter**: Transitive dependencies of
+  matched tests are included so setup tests still run
+
 ## 0.3.2 (2026-04-06)
 
 ### Breaking changes

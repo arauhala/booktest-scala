@@ -530,13 +530,39 @@ class TestRunner(config: RunConfig = RunConfig()) {
     * acceptance for diffs/failures, so you can examine results from a
     * non-interactive run without waiting for tests to execute again.
     */
+  /** Review previous test results without re-running tests.
+    * Like Python booktest's -w: reprints all results and offers interactive
+    * acceptance for diffs/failures, so you can examine results from a
+    * non-interactive run without waiting for tests to execute again.
+    */
   def reviewResults(suites: List[TestSuite]): Int = {
     val outDir = config.outputDir / ".out"
-    val reports = CaseReports.fromDir(outDir)
+    val allReports = CaseReports.fromDir(outDir)
 
-    if (reports.cases.isEmpty) {
+    if (allReports.cases.isEmpty) {
       println("No previous test results found. Run tests first.")
       return 1
+    }
+
+    // Filter case reports to only selected suites (like Python booktest)
+    val selectedPrefixes = suites.map(s => config.getSuitePath(s.fullClassName))
+    val selectedTestNames = suites.flatMap { suite =>
+      val suitePath = config.getSuitePath(suite.fullClassName)
+      suite.testCases.map(tc => s"$suitePath/${tc.name}")
+    }.toSet
+
+    val reports = if (selectedPrefixes.nonEmpty) {
+      new CaseReports(allReports.cases.filter { c =>
+        selectedTestNames.contains(c.testName) ||
+          selectedPrefixes.exists(p => c.testName.startsWith(p + "/"))
+      })
+    } else {
+      allReports
+    }
+
+    if (reports.cases.isEmpty) {
+      println("No matching test results found for the selected tests.")
+      return 0
     }
 
     println()
@@ -549,48 +575,37 @@ class TestRunner(config: RunConfig = RunConfig()) {
     var quit = false
 
     reports.cases.takeWhile(_ => !quit).foreach { caseReport =>
-      // Resolve paths: test name is like "examples/ExampleTests/hello"
-      // The .out file is at books/.out/examples/ExampleTests/hello.md
-      // The snapshot is at books/examples/ExampleTests/hello.md
       val testRelPath = os.RelPath(caseReport.testName)
       val outFile = outDir / testRelPath / os.up / s"${testRelPath.last}.md"
       val snapshotFile = config.snapshotDir / testRelPath / os.up / s"${testRelPath.last}.md"
       val logFile = outDir / testRelPath / os.up / s"${testRelPath.last}.log"
 
-      val hasDiff = os.exists(outFile) && {
-        val output = os.read(outFile)
-        val snapshot = if (os.exists(snapshotFile)) Some(os.read(snapshotFile)) else None
-        !snapshot.exists(_ == output)
-      }
-
-      val isPassed = caseReport.result == "OK" && !hasDiff
+      // Trust the case report result — token-by-token comparison already
+      // accounted for info-only diffs during the test run
+      val isPassed = caseReport.result == "OK"
 
       if (isPassed) {
-        // Show passed tests in compact form
-        if (config.verbose) {
-          println(s"  ${caseReport.testName}..${LightGreen("ok")} ${caseReport.durationMs} ms")
-        } else {
-          println(s"  ${caseReport.testName}..${LightGreen("ok")} ${caseReport.durationMs} ms")
+        println(s"  ${caseReport.testName}..${LightGreen("ok")} ${caseReport.durationMs} ms")
+        if (config.verbose && os.exists(outFile)) {
+          println()
+          os.read(outFile).linesIterator.foreach(line => println(s"  $line"))
+          println()
         }
         totalPassed += 1
       } else {
-        // Show failed/diff test with details
         val statusColor = if (caseReport.result == "FAIL") LightRed("FAIL") else Colors.Orange("DIFF")
         println(s"  ${caseReport.testName}..$statusColor ${caseReport.durationMs} ms")
 
-        // Show diff if output file exists
         if (os.exists(outFile)) {
           val output = os.read(outFile)
           val snapshot = if (os.exists(snapshotFile)) Some(os.read(snapshotFile)) else None
 
-          // Show verbose output content
           if (config.verbose) {
             println()
             output.linesIterator.foreach(line => println(s"  $line"))
             println()
           }
 
-          // Show diff
           snapshot match {
             case Some(snap) if snap != output =>
               val diff = SnapshotManager.generateDiff(snap, output)
@@ -599,22 +614,21 @@ class TestRunner(config: RunConfig = RunConfig()) {
             case None =>
               println(s"  No snapshot found for test '${caseReport.testName}'")
               println()
-            case _ => // snapshot matches but result was FAIL (explicit failure)
+            case _ =>
               println()
           }
 
-          // Interactive acceptance
+          // Interactive review for DIFF/FAIL tests
           if (config.interactive && !quit) {
             var validInput = false
             while (!validInput && !quit) {
-              print(s"  ${LightYellow("(a)ccept, (c)ontinue, (q)uit:")} ")
+              print(s"  ${LightYellow("(a)ccept, (c)ontinue, (v)iew, (l)ogs, (q)uit:")} ")
               val input = scala.io.StdIn.readLine()
               if (input == null) {
                 quit = true
               } else {
                 input.trim.toLowerCase match {
                   case "a" | "accept" =>
-                    // Accept: copy .out file to snapshot location
                     os.makeDir.all(snapshotFile / os.up)
                     os.copy.over(outFile, snapshotFile)
                     println(s"  ${LightGreen("Changes accepted.")}")
@@ -622,6 +636,23 @@ class TestRunner(config: RunConfig = RunConfig()) {
                     validInput = true
                   case "c" | "continue" =>
                     validInput = true
+                  case "v" | "view" =>
+                    println()
+                    output.linesIterator.foreach(line => println(s"  $line"))
+                    println()
+                  case "l" | "logs" =>
+                    if (os.exists(logFile)) {
+                      val log = os.read(logFile)
+                      if (log.trim.nonEmpty) {
+                        println()
+                        log.linesIterator.foreach(line => println(s"    $line"))
+                        println()
+                      } else {
+                        println(s"  ${LightCyan("(no logs)")}")
+                      }
+                    } else {
+                      println(s"  ${LightCyan("(no log file)")}")
+                    }
                   case "q" | "quit" =>
                     quit = true
                   case _ =>
