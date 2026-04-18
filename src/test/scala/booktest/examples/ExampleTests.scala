@@ -32,8 +32,8 @@ class ExampleTests extends TestSuite {
   
   def testInfoAndData(t: TestCaseRun): Unit = {
     t.h1("Info vs Data Test")
-    t.tln("This line will be checked against snapshot ")
-    t.i("This line is info only and won't be checked ")
+    t.tln("This line will be checked against snapshot")
+    t.i("This line is info only and won't be checked")
     t.iln("This info line ends with newline")
     t.tln("This line will be checked again")
   }
