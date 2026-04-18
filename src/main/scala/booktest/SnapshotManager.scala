@@ -237,7 +237,7 @@ object SnapshotManager {
     var response: InteractiveResponse = InteractiveResponse.Reject
     var validInput = false
     while (!validInput) {
-      print(s"  ${LightYellow("(a)ccept, (c)ontinue, (aq) accept & quit or (q)uit?")} ")
+      print(s"  (a)ccept, (c)ontinue, (aq) accept & quit or (q)uit? ")
       val input = scala.io.StdIn.readLine()
       if (input == null) {
         response = InteractiveResponse.Quit
@@ -312,7 +312,7 @@ object SnapshotManager {
         var shouldSkip = false
 
         while (!validInput && !quit) {
-          print(s"  ${LightYellow("(a)ccept, (c)ontinue, (s)kip, (aq) accept & quit or (q)uit?")} ")
+          print(s"  (a)ccept, (c)ontinue, (s)kip, (aq) accept & quit or (q)uit? ")
           val input = scala.io.StdIn.readLine()
 
           if (input == null) {

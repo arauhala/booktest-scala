@@ -640,7 +640,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
           if (config.interactive && !quit) {
             var validInput = false
             while (!validInput && !quit) {
-              print(s"  ${LightYellow("(a)ccept, (c)ontinue, (v)iew, (l)ogs, (d)iff, (aq) accept & quit or (q)uit?")} ")
+              print(s"  (a)ccept, (c)ontinue, (v)iew, (l)ogs, (d)iff, (aq) accept & quit or (q)uit? ")
               val input = scala.io.StdIn.readLine()
               if (input == null) {
                 quit = true
