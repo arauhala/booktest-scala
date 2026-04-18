@@ -310,7 +310,7 @@ object BooktestMain {
     println(result.summary)
     
     if (!result.success) {
-      throw new BooktestFailure(s"${result.failedTests}/${result.totalTests} test failed")
+      throw new BooktestFailure(result.summary)
     }
   }
   

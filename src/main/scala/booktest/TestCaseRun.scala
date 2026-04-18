@@ -2,6 +2,8 @@ package booktest
 
 import os.Path
 import java.io.{BufferedReader, FileReader, PrintWriter, BufferedWriter, FileWriter}
+import fansi.Color
+import fansi.Color.{LightRed, LightYellow, LightCyan}
 
 class TestCaseRun(
   val testName: String,
@@ -32,6 +34,11 @@ class TestCaseRun(
   def diffs: Int = _diffs
   def errors: Int = _errors
   def infoDiffs: Int = _infoDiffs
+
+  // --- Inline diff report (colored, like Python booktest) ---
+  private val diffReportBuffer = new StringBuilder
+  private val DiffLineWidth = 60
+  private def dimGray(text: String): String = s"\u001b[2m\u001b[90m$text\u001b[0m"
 
   // --- Snapshot reader state ---
   private var expReader: BufferedReader = _
@@ -1199,10 +1206,14 @@ class TestCaseRun(
         } else if (infoCheck) {
           lineMarkers = lineMarkers :+ (startPos, outLine.length, "info")
         }
-      } else if (expFileExists && expToken.isEmpty && check) {
-        // Beyond end of snapshot — new test content
-        lineMarkers = lineMarkers :+ (startPos, outLine.length, "diff")
-        if (lineDiff.isEmpty) lineDiff = Some(startPos)
+      } else if (expFileExists && expToken.isEmpty) {
+        // Beyond end of snapshot
+        if (check) {
+          lineMarkers = lineMarkers :+ (startPos, outLine.length, "diff")
+          if (lineDiff.isEmpty) lineDiff = Some(startPos)
+        } else if (infoCheck) {
+          lineMarkers = lineMarkers :+ (startPos, outLine.length, "info")
+        }
       }
     }
   }
@@ -1251,12 +1262,11 @@ class TestCaseRun(
     val hasMarkers = lineMarkers.nonEmpty
     val hasLineMarkers = lineError.isDefined || lineDiff.isDefined
 
-    if (hasMarkers || hasLineMarkers) {
-      // Determine what kind of markers we have
-      val hasError = lineError.isDefined || lineMarkers.exists(_._3 == "fail")
-      val hasDiff = lineDiff.isDefined || lineMarkers.exists(_._3 == "diff")
-      val hasInfo = lineMarkers.exists(_._3 == "info")
+    val hasError = lineError.isDefined || lineMarkers.exists(_._3 == "fail")
+    val hasDiff = lineDiff.isDefined || lineMarkers.exists(_._3 == "diff")
+    val hasInfo = lineMarkers.exists(_._3 == "info")
 
+    if (hasMarkers || hasLineMarkers) {
       if (hasError) {
         _errors += 1
       } else if (hasDiff) {
@@ -1264,6 +1274,22 @@ class TestCaseRun(
       } else if (hasInfo) {
         _infoDiffs += 1
       }
+    }
+
+    // Build inline diff report line (like Python booktest)
+    // Symbols: ! (red) = error/fail, ? (yellow) = content diff, . (cyan) = info-only diff
+    val expectedStr = if (expLine != null) expLine else "EOF"
+    if (hasError) {
+      val padded = outLine.take(DiffLineWidth).padTo(DiffLineWidth, ' ')
+      diffReportBuffer.append(s"${LightRed("!")} ${LightRed(padded)} | ${dimGray(expectedStr)}\n")
+    } else if (hasDiff) {
+      val padded = outLine.take(DiffLineWidth).padTo(DiffLineWidth, ' ')
+      diffReportBuffer.append(s"${LightYellow("?")} ${LightYellow(padded)} | ${dimGray(expectedStr)}\n")
+    } else if (hasInfo) {
+      val padded = outLine.take(DiffLineWidth).padTo(DiffLineWidth, ' ')
+      diffReportBuffer.append(s"${LightCyan(".")} ${LightCyan(padded)} | ${dimGray(expectedStr)}\n")
+    } else {
+      diffReportBuffer.append(s"  ${outLine.take(DiffLineWidth)}\n")
     }
 
     writeLine()
@@ -1292,6 +1318,10 @@ class TestCaseRun(
 
   /** Get full output — same as getOutput. All feeds write to snapshot. */
   def getTestOutput: String = outputBuffer.toString
+
+  /** Get inline diff report with colored markers (like Python booktest).
+    * Uses ! (red) for errors/diffs, . (cyan) for info-only diffs. */
+  def getDiffReport: String = diffReportBuffer.toString
 
   /** Write output is now handled incrementally via start()/end().
     * This method is kept for backward compatibility but is a no-op if start() was called. */

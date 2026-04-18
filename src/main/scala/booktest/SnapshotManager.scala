@@ -1,7 +1,17 @@
 package booktest
 
 import fansi.Color
-import fansi.Color.{LightRed, LightGreen, LightYellow, LightCyan, LightBlue}
+import fansi.Color.{LightRed, LightGreen, LightYellow, LightBlue}
+
+// Interactive prompt responses
+sealed trait InteractiveResponse
+object InteractiveResponse {
+  case object Accept extends InteractiveResponse
+  case object Reject extends InteractiveResponse
+  case object Skip extends InteractiveResponse
+  case object Quit extends InteractiveResponse
+  case object AcceptAndQuit extends InteractiveResponse
+}
 
 // Diff display modes
 sealed trait DiffMode
@@ -53,17 +63,23 @@ object SnapshotManager {
       (true, SuccessState.OK)
     }
 
-    // Generate diff for display (post-hoc line comparison for readable output)
+    // Use inline diff report from TestCaseRun (generated during execution with
+    // proper info/diff/error markers), falling back to post-hoc diff
     val diff = if (!passed) {
-      snapshot match {
-        case Some(snapshotContent) if testOutput.trim != snapshotContent.trim =>
-          Some(generateDiff(snapshotContent, testOutput, diffMode))
-        case None =>
-          Some(s"No snapshot found for test '${testRun.testName}'")
-        case _ if hasErrors =>
-          testRun.failMessage.map(m => s"Test explicitly failed: $m")
-        case _ =>
-          None
+      val inlineDiff = testRun.getDiffReport
+      if (inlineDiff.trim.nonEmpty && snapshot.isDefined) {
+        Some(inlineDiff)
+      } else {
+        snapshot match {
+          case Some(snapshotContent) if testOutput.trim != snapshotContent.trim =>
+            Some(generateDiff(snapshotContent, testOutput, diffMode))
+          case None =>
+            Some(s"No snapshot found for test '${testRun.testName}'")
+          case _ if hasErrors =>
+            testRun.failMessage.map(m => s"Test explicitly failed: $m")
+          case _ =>
+            None
+        }
       }
     } else {
       None
@@ -111,26 +127,32 @@ object SnapshotManager {
     }
   }
 
+  private val DiffLineWidth = 60
+  private def dimGray(text: String): String = s"\u001b[2m\u001b[90m$text\u001b[0m"
+
   private def generateUnifiedDiff(expected: String, actual: String): String = {
-    val expectedLines = expected.split("\n")
-    val actualLines = actual.split("\n")
+    val expectedLines = expected.split("\n", -1)
+    val actualLines = actual.split("\n", -1)
     val maxLines = math.max(expectedLines.length, actualLines.length)
 
     val diffLines = (0 until maxLines).map { i =>
-      val expectedLine = if (i < expectedLines.length) expectedLines(i) else ""
-      val actualLine = if (i < actualLines.length) actualLines(i) else ""
+      val expectedLine = if (i < expectedLines.length) Some(expectedLines(i)) else None
+      val actualLine = if (i < actualLines.length) Some(actualLines(i)) else None
 
-      if (expectedLine == actualLine) {
-        s"  $actualLine"
-      } else {
-        val result = new StringBuilder
-        if (expectedLine.nonEmpty) {
-          result.append(LightRed(s"- $expectedLine")).append("\n")
-        }
-        if (actualLine.nonEmpty) {
-          result.append(LightGreen(s"+ $actualLine"))
-        }
-        result.toString
+      (actualLine, expectedLine) match {
+        case (Some(act), Some(exp)) if act == exp =>
+          s"  ${act.take(DiffLineWidth)}"
+        case (Some(act), Some(exp)) =>
+          val padded = act.take(DiffLineWidth).padTo(DiffLineWidth, ' ')
+          s"${LightYellow("?")} ${LightYellow(padded)} | ${dimGray(exp)}"
+        case (Some(act), None) =>
+          val padded = act.take(DiffLineWidth).padTo(DiffLineWidth, ' ')
+          s"${LightYellow("?")} ${LightYellow(padded)} | ${dimGray("EOF")}"
+        case (None, Some(exp)) =>
+          val padded = "".padTo(DiffLineWidth, ' ')
+          s"${LightYellow("?")} ${LightYellow(padded)} | ${dimGray(exp)}"
+        case (None, None) =>
+          ""
       }
     }
 
@@ -138,27 +160,22 @@ object SnapshotManager {
   }
 
   private def generateSideBySideDiff(expected: String, actual: String): String = {
-    val expectedLines = expected.split("\n")
-    val actualLines = actual.split("\n")
+    val expectedLines = expected.split("\n", -1)
+    val actualLines = actual.split("\n", -1)
     val maxLines = math.max(expectedLines.length, actualLines.length)
-    val maxWidth = 40
 
-    val header = s"${"Expected".padTo(maxWidth, ' ')} | ${"Actual".padTo(maxWidth, ' ')}"
-    val separator = s"${"-" * maxWidth} | ${"-" * maxWidth}"
+    val header = s"  ${"Actual".padTo(DiffLineWidth, ' ')} | Expected"
+    val separator = s"  ${"-" * DiffLineWidth}-+-${"-" * DiffLineWidth}"
 
     val diffLines = (0 until maxLines).map { i =>
       val expectedLine = if (i < expectedLines.length) expectedLines(i) else ""
       val actualLine = if (i < actualLines.length) actualLines(i) else ""
 
-      val expectedDisplay = if (expectedLine.length > maxWidth) expectedLine.take(maxWidth - 3) + "..." else expectedLine
-      val actualDisplay = if (actualLine.length > maxWidth) actualLine.take(maxWidth - 3) + "..." else actualLine
-
       if (expectedLine == actualLine) {
-        s"${expectedDisplay.padTo(maxWidth, ' ')} | ${actualDisplay.padTo(maxWidth, ' ')}"
+        s"  ${actualLine.take(DiffLineWidth).padTo(DiffLineWidth, ' ')} | ${expectedLine.take(DiffLineWidth)}"
       } else {
-        val ef = if (expectedLine.nonEmpty) LightRed(expectedDisplay.padTo(maxWidth, ' ')) else "".padTo(maxWidth, ' ')
-        val af = if (actualLine.nonEmpty) LightGreen(actualDisplay.padTo(maxWidth, ' ')) else "".padTo(maxWidth, ' ')
-        s"$ef | $af"
+        val padded = actualLine.take(DiffLineWidth).padTo(DiffLineWidth, ' ')
+        s"${LightYellow("?")} ${LightYellow(padded)} | ${dimGray(expectedLine.take(DiffLineWidth))}"
       }
     }
 
@@ -166,22 +183,19 @@ object SnapshotManager {
   }
 
   private def generateInlineDiff(expected: String, actual: String): String = {
-    val expectedLines = expected.split("\n")
-    val actualLines = actual.split("\n")
+    val expectedLines = expected.split("\n", -1)
+    val actualLines = actual.split("\n", -1)
     val maxLines = math.max(expectedLines.length, actualLines.length)
 
-    val diffLines = (0 until maxLines).flatMap { i =>
+    val diffLines = (0 until maxLines).map { i =>
       val expectedLine = if (i < expectedLines.length) expectedLines(i) else ""
       val actualLine = if (i < actualLines.length) actualLines(i) else ""
 
       if (expectedLine == actualLine) {
-        List(f"${i + 1}%3d: $actualLine")
+        f"${i + 1}%3d:   $actualLine"
       } else {
-        val result = List.newBuilder[String]
-        result += s"${LightBlue(s"@@ Line ${i + 1} @@")}"
-        if (expectedLine.nonEmpty) result += s"${LightRed(s"- $expectedLine")}"
-        if (actualLine.nonEmpty) result += s"${LightGreen(s"+ $actualLine")}"
-        result.result()
+        val padded = actualLine.take(DiffLineWidth).padTo(DiffLineWidth, ' ')
+        f"${i + 1}%3d: ${LightYellow("?")} ${LightYellow(padded)} | ${dimGray(expectedLine)}"
       }
     }
 
@@ -208,10 +222,52 @@ object SnapshotManager {
     }
   }
 
-  def printTestResult(result: TestResult, interactive: Boolean = false): Boolean = {
+  def runDiffTool(expectedFile: os.Path, actualFile: os.Path): Unit = {
+    val tool = sys.env.getOrElse("BOOKTEST_DIFF_TOOL", "diff")
+    val cmd = s"$tool ${expectedFile} ${actualFile}"
+    os.proc("sh", "-c", cmd).call(
+      stdin = os.Inherit,
+      stdout = os.Inherit,
+      stderr = os.Inherit,
+      check = false
+    ).exitCode
+  }
+
+  def promptInteractive(): InteractiveResponse = {
+    var response: InteractiveResponse = InteractiveResponse.Reject
+    var validInput = false
+    while (!validInput) {
+      print(s"  ${LightYellow("(a)ccept, (c)ontinue, (aq) accept & quit or (q)uit?")} ")
+      val input = scala.io.StdIn.readLine()
+      if (input == null) {
+        response = InteractiveResponse.Quit
+        validInput = true
+      } else {
+        input.trim.toLowerCase match {
+          case "a" | "accept" =>
+            response = InteractiveResponse.Accept
+            validInput = true
+          case "c" | "continue" | "" =>
+            response = InteractiveResponse.Reject
+            validInput = true
+          case "aq" =>
+            response = InteractiveResponse.AcceptAndQuit
+            validInput = true
+          case "q" | "quit" =>
+            response = InteractiveResponse.Quit
+            validInput = true
+          case _ =>
+            println(LightRed("  Invalid input. Please enter 'a', 'c', 'aq', or 'q'."))
+        }
+      }
+    }
+    response
+  }
+
+  def printTestResult(result: TestResult, interactive: Boolean = false): InteractiveResponse = {
     if (result.passed) {
       println(LightGreen(s"✓ ${result.testName}"))
-      false
+      InteractiveResponse.Reject
     } else {
       println(LightRed(s"✗ ${result.testName}"))
       result.diff.foreach { diff =>
@@ -221,11 +277,9 @@ object SnapshotManager {
       }
 
       if (interactive) {
-        print(s"Accept changes for ${result.testName}? (y/N): ")
-        val input = scala.io.StdIn.readLine().trim.toLowerCase
-        input == "y" || input == "yes"
+        promptInteractive()
       } else {
-        false
+        InteractiveResponse.Reject
       }
     }
   }
@@ -258,40 +312,47 @@ object SnapshotManager {
         var shouldSkip = false
 
         while (!validInput && !quit) {
-          print(s"${LightYellow("Options:")} [y]es / [n]o / [s]kip / [q]uit: ")
-          val input = scala.io.StdIn.readLine().trim.toLowerCase
+          print(s"  ${LightYellow("(a)ccept, (c)ontinue, (s)kip, (aq) accept & quit or (q)uit?")} ")
+          val input = scala.io.StdIn.readLine()
 
-          input match {
-            case "y" | "yes" =>
-              shouldAccept = true
-              validInput = true
-              println(LightGreen("Changes accepted"))
+          if (input == null) {
+            quit = true
+          } else {
+            input.trim.toLowerCase match {
+              case "a" | "accept" =>
+                shouldAccept = true
+                validInput = true
+                println(LightGreen("  Changes accepted"))
 
-            case "n" | "no" =>
-              shouldAccept = false
-              validInput = true
-              println(LightRed("Changes rejected"))
+              case "c" | "continue" =>
+                shouldAccept = false
+                validInput = true
 
-            case "s" | "skip" =>
-              shouldSkip = true
-              validInput = true
-              println(LightYellow("Skipped"))
+              case "s" | "skip" =>
+                shouldSkip = true
+                validInput = true
+                println(LightYellow("  Skipped"))
 
-            case "q" | "quit" =>
-              println(LightBlue("Review session terminated."))
-              quit = true
+              case "aq" =>
+                shouldAccept = true
+                validInput = true
+                quit = true
+                println(LightGreen("  Changes accepted. Quitting review."))
 
-            case _ =>
-              println(LightRed("Invalid input. Please enter 'y', 'n', 's', or 'q'."))
+              case "q" | "quit" =>
+                println(LightBlue("  Review session terminated."))
+                quit = true
+
+              case _ =>
+                println(LightRed("  Invalid input. Please enter 'a', 'c', 's', 'aq', or 'q'."))
+            }
           }
         }
 
-        if (!quit) {
-          if (shouldAccept) {
-            updatedResults += result.copy(passed = true)
-          } else if (!shouldSkip) {
-            updatedResults += result
-          }
+        if (shouldAccept) {
+          updatedResults += result.copy(passed = true)
+        } else if (!shouldSkip && !quit) {
+          updatedResults += result
         }
       }
 

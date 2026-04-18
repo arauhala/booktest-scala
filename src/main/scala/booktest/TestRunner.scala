@@ -37,12 +37,18 @@ case class RunResult(
   totalDurationMs: Long = 0
 ) {
   def success: Boolean = failedTests == 0
-  
+
   def summary: String = {
     if (success) {
       s"$totalTests/$totalTests test succeeded in $totalDurationMs ms"
     } else {
-      s"$failedTests/$totalTests test failed in $totalDurationMs ms"
+      val diffCount = results.count(r => !r.passed && r.successState == SuccessState.DIFF)
+      val failCount = results.count(r => !r.passed && r.successState == SuccessState.FAIL)
+      val parts = List.newBuilder[String]
+      if (diffCount > 0) parts += s"$diffCount differed"
+      if (failCount > 0) parts += s"$failCount failed"
+      val detail = parts.result().mkString(" and ")
+      s"$failedTests/$totalTests test $detail in $totalDurationMs ms"
     }
   }
 }
@@ -50,6 +56,7 @@ case class RunResult(
 class TestRunner(config: RunConfig = RunConfig()) {
   private val dependencyCache = new DependencyCache()
   private val resourceManager = ResourceManager.fromEnv()
+  @volatile private var interactiveQuit = false
 
   /** Get the resource manager for tests that need ports/resources */
   def resources: ResourceManager = resourceManager
@@ -168,7 +175,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
         dependencyCache.put(testRun, returnValue)
       }
 
-      val shouldAccept = if (autoAccept && !result.passed) {
+      val response: InteractiveResponse = if (autoAccept && !result.passed) {
         // Auto-accept mode: update snapshot silently
         if (config.verbose) {
           // Print test output in verbose mode
@@ -180,35 +187,46 @@ class TestRunner(config: RunConfig = RunConfig()) {
         } else {
           println(s"${LightYellow("snapshot updated")} ${duration} ms")
         }
-        true
+        InteractiveResponse.Accept
       } else if (config.verbose) {
         // Verbose mode: show test output content like Python
         printVerboseOutput(testRun)
         if (result.passed) {
           println(s"$fullTestName ${LightGreen("ok")} ${duration} ms.")
+          println()
+          InteractiveResponse.Reject
         } else {
-          println(s"$fullTestName ${Colors.Orange("DIFF")} ${duration} ms.")
+          println(s"$fullTestName ${LightYellow("DIFF")} ${duration} ms.")
           // Show diff inline in verbose mode
           result.diff.foreach { diff =>
             println()
             println(diff)
           }
+          println()
+          if (config.interactive) {
+            SnapshotManager.promptInteractive()
+          } else {
+            InteractiveResponse.Reject
+          }
         }
-        println()
-        !result.passed && config.interactive
       } else if (config.summaryMode) {
         // Python-style: show status inline, collect diffs for end
         if (result.passed) {
           println(s"${LightGreen("ok")} ${duration} ms")
         } else {
-          println(s"${Colors.Orange("DIFF")} ${duration} ms")
+          println(s"${LightYellow("DIFF")} ${duration} ms")
         }
-        false
+        InteractiveResponse.Reject
       } else if (!result.passed) {
         SnapshotManager.printTestResult(result, config.interactive)
       } else {
         println(s"${duration} ms")
-        false
+        InteractiveResponse.Reject
+      }
+
+      val shouldAccept = response == InteractiveResponse.Accept || response == InteractiveResponse.AcceptAndQuit
+      if (response == InteractiveResponse.Quit || response == InteractiveResponse.AcceptAndQuit) {
+        interactiveQuit = true
       }
 
       if (shouldAccept && !result.passed) {
@@ -311,7 +329,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val allResults = if (config.threads > 1) {
       runSuitesParallel(suites, todoSet)
     } else {
-      suites.map { suite =>
+      suites.takeWhile(_ => !interactiveQuit).map { suite =>
         runSuiteWithFilter(suite, todoSet)
       }
     }
@@ -479,7 +497,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
         runTestsParallel(testsToRun, fullClassName, suite)
       } else {
         val sortedTests = resolveDependencyOrder(testsToRun)
-        sortedTests.map(runTestCase(_, fullClassName, suite))
+        sortedTests.takeWhile(_ => !interactiveQuit).map(runTestCase(_, fullClassName, suite))
       }
     } finally {
       // Call afterAll hook
@@ -593,7 +611,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
         }
         totalPassed += 1
       } else {
-        val statusColor = if (caseReport.result == "FAIL") LightRed("FAIL") else Colors.Orange("DIFF")
+        val statusColor = if (caseReport.result == "FAIL") LightRed("FAIL") else LightYellow("DIFF")
         println(s"  ${caseReport.testName}..$statusColor ${caseReport.durationMs} ms")
 
         if (os.exists(outFile)) {
@@ -622,7 +640,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
           if (config.interactive && !quit) {
             var validInput = false
             while (!validInput && !quit) {
-              print(s"  ${LightYellow("(a)ccept, (c)ontinue, (v)iew, (l)ogs, (q)uit:")} ")
+              print(s"  ${LightYellow("(a)ccept, (c)ontinue, (v)iew, (l)ogs, (d)iff, (aq) accept & quit or (q)uit?")} ")
               val input = scala.io.StdIn.readLine()
               if (input == null) {
                 quit = true
@@ -653,6 +671,19 @@ class TestRunner(config: RunConfig = RunConfig()) {
                     } else {
                       println(s"  ${LightCyan("(no log file)")}")
                     }
+                  case "d" | "diff" =>
+                    if (os.exists(snapshotFile)) {
+                      SnapshotManager.runDiffTool(snapshotFile, outFile)
+                    } else {
+                      println(s"  ${LightCyan("(no snapshot to diff against)")}")
+                    }
+                  case "aq" =>
+                    os.makeDir.all(snapshotFile / os.up)
+                    os.copy.over(outFile, snapshotFile)
+                    println(s"  ${LightGreen("Changes accepted. Quitting review.")}")
+                    accepted += 1
+                    validInput = true
+                    quit = true
                   case "q" | "quit" =>
                     quit = true
                   case _ =>
@@ -825,7 +856,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
                 if (result.passed) {
                   println(s"${result.testName} ${LightGreen("ok")} ${result.durationMs} ms.")
                 } else {
-                  println(s"${result.testName} ${Colors.Orange("DIFF")} ${result.durationMs} ms.")
+                  println(s"${result.testName} ${LightYellow("DIFF")} ${result.durationMs} ms.")
                   result.diff.foreach { diff =>
                     println()
                     println(diff)
@@ -837,7 +868,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
                 println(s"  ${result.testName}..${LightGreen("ok")} ${result.durationMs} ms")
                 result
               } else {
-                println(s"  ${result.testName}..${Colors.Orange("DIFF")} ${result.durationMs} ms")
+                println(s"  ${result.testName}..${LightYellow("DIFF")} ${result.durationMs} ms")
                 result
               }
 
