@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: sbt
+
+      - uses: sbt/setup-sbt@v1
+
+      - name: Compile (Scala 3.3.1)
+        run: sbt ++3.3.1 compile
+
+      - name: Compile tests
+        run: sbt ++3.3.1 Test/compile
+
+      - name: Run booktest (sequential)
+        run: sbt ++3.3.1 "Test/runMain booktest.BooktestMain examples"
+
+      - name: Run booktest (parallel)
+        run: sbt ++3.3.1 "Test/runMain booktest.BooktestMain -p4 examples"
+
+      - name: Run meta tests
+        run: sbt ++3.3.1 "Test/runMain booktest.BooktestMain test"
+
+  cross-compile:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        scala: ["2.12.18", "2.13.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+          cache: sbt
+
+      - uses: sbt/setup-sbt@v1
+
+      - name: Compile (Scala ${{ matrix.scala }})
+        run: sbt ++${{ matrix.scala }} compile
