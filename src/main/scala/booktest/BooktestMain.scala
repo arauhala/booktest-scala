@@ -305,10 +305,9 @@ object BooktestMain {
 
     val runner = new TestRunner(config)
     val result = runner.runMultipleSuites(suites)
-    
-    println()
-    println(result.summary)
-    
+
+    result.printSummary()
+
     if (!result.success) {
       throw new BooktestFailure(result.summary)
     }

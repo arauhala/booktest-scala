@@ -51,6 +51,23 @@ case class RunResult(
       s"$failedTests/$totalTests test $detail in $totalDurationMs ms"
     }
   }
+
+  def printSummary(): Unit = {
+    println()
+    if (success) {
+      println(summary)
+    } else {
+      println(s"$summary:")
+      println()
+      results.filter(!_.passed).foreach { r =>
+        val status = r.successState match {
+          case SuccessState.FAIL => LightRed("FAIL")
+          case _ => LightYellow("DIFF")
+        }
+        println(s"  ${r.testName} - $status")
+      }
+    }
+  }
 }
 
 class TestRunner(config: RunConfig = RunConfig()) {
