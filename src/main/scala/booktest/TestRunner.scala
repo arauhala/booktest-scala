@@ -141,7 +141,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       }
 
       val returnValue = try {
-        executeTestWithDependencies(testCase, testRun)
+        executeTestWithDependencies(testCase, testRun, suitePath)
       } finally {
         // Call teardown hook (always, even if test fails)
         if (suite != null) {
@@ -189,7 +189,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
       // Cache the return value if test passed OR if in auto-accept mode (where we'll accept the new snapshot)
       // This allows dependent tests to use the return value even when creating new snapshots
       if (result.passed || (autoAccept && !testRun.isFailed)) {
-        dependencyCache.put(testRun, returnValue)
+        dependencyCache.put(fullTestName, returnValue)
+        testRun.saveReturnValue(returnValue)
       }
 
       val response: InteractiveResponse = if (autoAccept && !result.passed) {
@@ -964,7 +965,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       }
 
       val returnValue = try {
-        executeTestWithDependencies(testCase, testRun)
+        executeTestWithDependencies(testCase, testRun, suitePath)
       } finally {
         if (suite != null) {
           try { suite.getTeardown(testRun) }
@@ -1003,7 +1004,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
       val autoAccept = config.recaptureAll || config.updateSnapshots
       if (result.passed || (autoAccept && !testRun.isFailed)) {
         this.synchronized {
-          dependencyCache.put(testRun, returnValue)
+          dependencyCache.put(fullTestName, returnValue)
+          testRun.saveReturnValue(returnValue)
         }
       }
 
@@ -1051,10 +1053,15 @@ class TestRunner(config: RunConfig = RunConfig()) {
     }
   }
 
-  /** Load a dependency value from memory cache or bin file */
-  private def loadDependencyValue(depName: String, testRun: TestCaseRun): Option[Any] = {
-    // Try memory cache first
-    dependencyCache.get[Any](depName).orElse {
+  /** Load a dependency value from memory cache or bin file.
+    * @param depName short dependency name (e.g., "createData")
+    * @param suitePath suite path prefix (e.g., "examples/MethodRefTests")
+    * @param testRun test run for bin file fallback
+    */
+  private def loadDependencyValue(depName: String, suitePath: String, testRun: TestCaseRun): Option[Any] = {
+    val qualifiedKey = s"$suitePath/$depName"
+    // Try memory cache first (qualified key)
+    dependencyCache.get[Any](qualifiedKey).orElse {
       // Fall back to loading from the dependency's bin file (same suite directory)
       val depBinFile = testRun.outDir / s"$depName.bin"
       if (os.exists(depBinFile)) {
@@ -1072,7 +1079,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
             case _ => serialized
           }
           // Cache in memory for subsequent lookups
-          dependencyCache.put(depName, result)
+          dependencyCache.put(qualifiedKey, result)
           Some(result)
         } catch {
           case _: Exception => None
@@ -1083,7 +1090,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
     }
   }
 
-  private def executeTestWithDependencies(testCase: TestCase, testRun: TestCaseRun): Any = {
+  private def executeTestWithDependencies(testCase: TestCase, testRun: TestCaseRun, suitePath: String = ""): Any = {
     testCase.originalFunction match {
       case Some(function) =>
         // New API: Use the stored function with proper type-safe dependency injection
@@ -1096,7 +1103,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
             println(s"    Looking for dependencies: ${testCase.dependencies}")
           }
           val dependencyValues = testCase.dependencies.map { depName =>
-            val cached = loadDependencyValue(depName, testRun)
+            val cached = loadDependencyValue(depName, suitePath, testRun)
             if (config.verbose) {
               println(s"    Dependency '$depName': ${cached.isDefined}")
             }
@@ -1134,7 +1141,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
                 println(s"    Looking for dependencies: ${testCase.dependencies}")
               }
               val dependencyValues = testCase.dependencies.map { depName =>
-                val cached = loadDependencyValue(depName, testRun)
+                val cached = loadDependencyValue(depName, suitePath, testRun)
                 if (config.verbose) {
                   println(s"    Dependency '$depName': ${cached.isDefined}")
                 }
