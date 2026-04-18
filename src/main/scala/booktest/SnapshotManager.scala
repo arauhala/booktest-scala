@@ -128,7 +128,7 @@ object SnapshotManager {
   }
 
   private val DiffLineWidth = 60
-  private def dimGray(text: String): String = s"\u001b[2m\u001b[90m$text\u001b[0m"
+  private def gray(text: String): String = s"\u001b[90m$text\u001b[0m"
 
   private def generateUnifiedDiff(expected: String, actual: String): String = {
     val expectedLines = expected.split("\n", -1)
@@ -144,13 +144,13 @@ object SnapshotManager {
           s"  ${act.take(DiffLineWidth)}"
         case (Some(act), Some(exp)) =>
           val padded = act.take(DiffLineWidth).padTo(DiffLineWidth, ' ')
-          s"${LightYellow("?")} ${LightYellow(padded)} | ${dimGray(exp)}"
+          s"${LightYellow("?")} ${LightYellow(padded)} | ${gray(exp)}"
         case (Some(act), None) =>
           val padded = act.take(DiffLineWidth).padTo(DiffLineWidth, ' ')
-          s"${LightYellow("?")} ${LightYellow(padded)} | ${dimGray("EOF")}"
+          s"${LightYellow("?")} ${LightYellow(padded)} | ${gray("EOF")}"
         case (None, Some(exp)) =>
           val padded = "".padTo(DiffLineWidth, ' ')
-          s"${LightYellow("?")} ${LightYellow(padded)} | ${dimGray(exp)}"
+          s"${LightYellow("?")} ${LightYellow(padded)} | ${gray(exp)}"
         case (None, None) =>
           ""
       }
@@ -175,7 +175,7 @@ object SnapshotManager {
         s"  ${actualLine.take(DiffLineWidth).padTo(DiffLineWidth, ' ')} | ${expectedLine.take(DiffLineWidth)}"
       } else {
         val padded = actualLine.take(DiffLineWidth).padTo(DiffLineWidth, ' ')
-        s"${LightYellow("?")} ${LightYellow(padded)} | ${dimGray(expectedLine.take(DiffLineWidth))}"
+        s"${LightYellow("?")} ${LightYellow(padded)} | ${gray(expectedLine.take(DiffLineWidth))}"
       }
     }
 
@@ -195,7 +195,7 @@ object SnapshotManager {
         f"${i + 1}%3d:   $actualLine"
       } else {
         val padded = actualLine.take(DiffLineWidth).padTo(DiffLineWidth, ' ')
-        f"${i + 1}%3d: ${LightYellow("?")} ${LightYellow(padded)} | ${dimGray(expectedLine)}"
+        f"${i + 1}%3d: ${LightYellow("?")} ${LightYellow(padded)} | ${gray(expectedLine)}"
       }
     }
 

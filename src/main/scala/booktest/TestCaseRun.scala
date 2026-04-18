@@ -38,7 +38,7 @@ class TestCaseRun(
   // --- Inline diff report (colored, like Python booktest) ---
   private val diffReportBuffer = new StringBuilder
   private val DiffLineWidth = 60
-  private def dimGray(text: String): String = s"\u001b[2m\u001b[90m$text\u001b[0m"
+  private def gray(text: String): String = s"\u001b[90m$text\u001b[0m"
 
   // --- Snapshot reader state ---
   private var expReader: BufferedReader = _
@@ -1281,13 +1281,13 @@ class TestCaseRun(
     val expectedStr = if (expLine != null) expLine else "EOF"
     if (hasError) {
       val padded = outLine.take(DiffLineWidth).padTo(DiffLineWidth, ' ')
-      diffReportBuffer.append(s"${LightRed("!")} ${LightRed(padded)} | ${dimGray(expectedStr)}\n")
+      diffReportBuffer.append(s"${LightRed("!")} ${LightRed(padded)} | ${gray(expectedStr)}\n")
     } else if (hasDiff) {
       val padded = outLine.take(DiffLineWidth).padTo(DiffLineWidth, ' ')
-      diffReportBuffer.append(s"${LightYellow("?")} ${LightYellow(padded)} | ${dimGray(expectedStr)}\n")
+      diffReportBuffer.append(s"${LightYellow("?")} ${LightYellow(padded)} | ${gray(expectedStr)}\n")
     } else if (hasInfo) {
       val padded = outLine.take(DiffLineWidth).padTo(DiffLineWidth, ' ')
-      diffReportBuffer.append(s"${LightCyan(".")} ${LightCyan(padded)} | ${dimGray(expectedStr)}\n")
+      diffReportBuffer.append(s"${LightCyan(".")} ${LightCyan(padded)} | ${gray(expectedStr)}\n")
     } else {
       diffReportBuffer.append(s"  ${outLine.take(DiffLineWidth)}\n")
     }
