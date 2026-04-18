@@ -128,7 +128,7 @@ object SnapshotManager {
   }
 
   private val DiffLineWidth = 60
-  private def gray(text: String): String = s"\u001b[90m$text\u001b[0m"
+  private def gray(text: String): String = s"\u001b[38;2;140;140;140m$text\u001b[0m"
 
   private def generateUnifiedDiff(expected: String, actual: String): String = {
     val expectedLines = expected.split("\n", -1)
