@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.3.5 (2026-04-18)
+
+### Interactive mode improvements
+
+- **Hard quit (`q`)**: Pressing `q` during interactive mode now stops test
+  execution immediately instead of continuing to the next test
+- **Accept and quit (`aq`)**: New command to accept the current diff and stop
+- **`(d)iff` option**: Launch external diff tool in review mode, configured
+  via `BOOKTEST_DIFF_TOOL` env var (defaults to `diff`)
+- **Uncolored prompts**: Interactive prompts now render in terminal default
+  color, matching Python booktest
+
+### Python-style diff formatting
+
+- **Diff symbols**: `?` (yellow) for content diffs, `!` (red) for fails,
+  `.` (cyan) for info-only diffs — matching Python booktest convention
+- **Inline diff report**: Generated during test execution with proper
+  token-level markers instead of post-hoc line comparison
+- **Expected text**: Shown in gray on the right side (`actual | expected`)
+- **DIFF status**: Changed from orange to yellow
+- **Summary format**: Now separates "differed" and "failed" counts
+  (e.g., "2 differed and 1 failed")
+- **Final report**: Lists individual failed tests with colored status
+
+### Bug fixes
+
+- **Dependency cache collision**: Fixed parallel execution (`-p4`) crash when
+  multiple suites have tests with the same name (e.g., `createData`). Cache
+  keys now include suite path.
+- **EOF token marking**: Info content beyond snapshot end now correctly marked
+  as info (was silently ignored)
+
+### CI
+
+- Added GitHub Actions CI workflow with Scala 3.3.1 tests and 2.12/2.13
+  cross-compilation checks
+
 ## 0.3.3 (2026-04-07)
 
 - **Orange DIFF status**: DIFF results now shown in orange instead of red,
