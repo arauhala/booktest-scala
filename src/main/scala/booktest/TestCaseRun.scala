@@ -38,7 +38,7 @@ class TestCaseRun(
   // --- Inline diff report (colored, like Python booktest) ---
   private val diffReportBuffer = new StringBuilder
   private val DiffLineWidth = 60
-  private def gray(text: String): String = s"\u001b[38;2;140;140;140m$text\u001b[0m"
+  private def gray(text: String): String = "\u001b[38;2;140;140;140m" + text + "\u001b[0m"
 
   // --- Snapshot reader state ---
   private var expReader: BufferedReader = _
