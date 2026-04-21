@@ -1,5 +1,5 @@
 # Metrics with Units
 
-94.99 %
-46.77 ms
-1242.57 req/s
+94.67 %
+44.14 ms
+1252.38 req/s

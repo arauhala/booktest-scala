@@ -936,21 +936,14 @@ class TestCaseRun(
     case other => other.toString
   }
 
-  /** Execute block, print elapsed time as info line, return block result */
+  /** Execute block, print elapsed time as info, return block result.
+    * Usage: t.t("label..").iMsLn { expensive() }
+    */
   def iMsLn[T](block: => T): T = {
-    iMsLn("")(block)
-  }
-
-  /** Execute block with label, print elapsed time as info line, return block result */
-  def iMsLn[T](label: String)(block: => T): T = {
     val start = System.currentTimeMillis()
     val result = block
     val elapsed = System.currentTimeMillis() - start
-    if (label.nonEmpty) {
-      iln(s"$label: ${elapsed}ms")
-    } else {
-      iln(s"${elapsed}ms")
-    }
+    iln(s"${elapsed}ms")
     result
   }
 

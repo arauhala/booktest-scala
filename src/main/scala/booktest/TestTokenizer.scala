@@ -33,12 +33,16 @@ class TestTokenizer(buf: String, private var at: Int = 0) extends Iterator[Strin
     }
 
     // Numbers: optional sign followed by digits with optional decimal
-    if (ch == '+' || ch == '-' || ch.isDigit || (ch == '.' && at + 1 < buf.length && buf.charAt(at + 1).isDigit)) {
+    // Note: '.' does NOT start a number — it's only a decimal separator within a number.
+    // This ensures ".40" tokenizes as "." + "40", not ".40", which is critical for
+    // token alignment between snapshot (tokenized as one string) and output (tokenized
+    // across multiple feed calls like testFeed("..") + infoFeed("40ms")).
+    if (ch == '+' || ch == '-' || ch.isDigit) {
       val start = at
       // Optional sign
-      if ((ch == '+' || ch == '-') && at + 1 < buf.length && (buf.charAt(at + 1).isDigit || buf.charAt(at + 1) == '.')) {
+      if ((ch == '+' || ch == '-') && at + 1 < buf.length && buf.charAt(at + 1).isDigit) {
         at += 1
-      } else if (!ch.isDigit && ch != '.') {
+      } else if (!ch.isDigit) {
         // Sign not followed by digit/dot — treat as special char
         at += 1
         return buf.substring(start, at)

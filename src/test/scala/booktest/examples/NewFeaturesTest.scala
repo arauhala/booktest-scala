@@ -10,14 +10,16 @@ class NewFeaturesTest extends TestSuite {
     t.tln("Testing iMsLn timing utility")
 
     // Timing with label
-    val result1 = t.iMsLn("Quick operation") {
+    t.i("Quick operation: ")
+    val result1 = t.iMsLn {
       Thread.sleep(10)
       "computed value"
     }
     t.tln(s"Result: $result1")
 
     // Another timing with label
-    val result2 = t.iMsLn("Heavy computation") {
+    t.i("Heavy computation: ")
+    val result2 = t.iMsLn {
       Thread.sleep(15)
       42
     }
