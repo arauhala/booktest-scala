@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.3.6 (2026-04-21)
+
+### Tokenizer fix for `t.t("label..").iMsLn { block }` pattern
+
+- **Token alignment fix**: `.` no longer starts a number token in the
+  tokenizer. Previously `.40` was tokenized as one number, but when output
+  comes from separate `testFeed("..") + infoFeed("40ms")` calls, the `.`
+  and `40` are separate tokens. This misalignment caused info-only timing
+  diffs to appear as test-failing content diffs.
+- **`iMsLn` overload fix**: Removed ambiguous curried `iMsLn(label)(block)`
+  overload. When the block returned `String`, Scala silently resolved
+  `iMsLn { expr }` to the label overload, discarding timing output entirely.
+  Use `t.t("label: ").iMsLn { block }` or `t.i("label: ").iMsLn { block }`
+  instead.
+- **`TimingInfoTest`**: New test suite verifying that timing differences from
+  `iMsLn` are treated as info-only (`.` cyan) and don't cause test failure.
+
 ## 0.3.5 (2026-04-18)
 
 ### Interactive mode improvements
