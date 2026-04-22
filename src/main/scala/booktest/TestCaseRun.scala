@@ -1048,23 +1048,23 @@ class TestCaseRun(
     }
   }
 
-  /** Assert condition, output result as test line */
+  /** Assert condition, output result as info line. Does not throw.
+    * Matches Python booktest: iln("ok") on success, fln("FAILED") on failure. */
   def assertln(condition: Boolean): TestCaseRun = {
     if (condition) {
-      tln("OK")
+      iln("ok")
     } else {
-      tln("FAILED")
-      fail("Assertion failed")
+      fln("FAILED")
     }
   }
 
-  /** Assert condition with label, output result as test line */
-  def assertln(label: String, condition: Boolean): TestCaseRun = {
+  /** Assert condition with message, output result as info line. Does not throw.
+    * Matches Python booktest: iln("ok") on success, fln(message) on failure. */
+  def assertln(condition: Boolean, message: String): TestCaseRun = {
     if (condition) {
-      tln(s"$label: OK")
+      iln("ok")
     } else {
-      tln(s"$label: FAILED")
-      fail(s"Assertion failed: $label")
+      fln(message)
     }
   }
 
