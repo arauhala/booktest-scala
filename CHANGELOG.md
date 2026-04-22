@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.7 (2026-04-22)
+
+### Bug fix: .bin return value caching
+
+- **Always cache return values on OK/DIFF**: Previously .bin files were only
+  written when the test passed (snapshot matched) or in auto-accept mode.
+  Tests with DIFF status (new or changed snapshots) didn't persist their
+  return values, breaking dependent tests. Now matches Python booktest:
+  .bin is written whenever the test ran successfully (OK or DIFF), and
+  deleted on FAIL (exception/t.fail()).
+
 ## 0.3.6 (2026-04-21)
 
 ### Tokenizer fix for `t.t("label..").iMsLn { block }` pattern

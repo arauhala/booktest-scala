@@ -313,6 +313,13 @@ class TestCaseRun(
     }
   }
 
+  /** Delete return value bin file (on test failure) */
+  def deleteReturnValue(): Unit = {
+    if (os.exists(binFile)) {
+      os.remove(binFile)
+    }
+  }
+
   /** Load return value from bin file */
   def loadReturnValue[T]: Option[T] = {
     try {

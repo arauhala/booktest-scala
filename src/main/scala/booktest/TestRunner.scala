@@ -186,11 +186,14 @@ class TestRunner(config: RunConfig = RunConfig()) {
       // Handle -S (recapture all) and -s (update snapshots) flags
       val autoAccept = config.recaptureAll || config.updateSnapshots
 
-      // Cache the return value if test passed OR if in auto-accept mode (where we'll accept the new snapshot)
-      // This allows dependent tests to use the return value even when creating new snapshots
-      if (result.passed || (autoAccept && !testRun.isFailed)) {
+      // Cache the return value on OK or DIFF (test ran successfully).
+      // On FAIL (exception/t.fail()), delete any stale .bin file.
+      // Matches Python booktest: .bin is for dependency injection, not snapshot status.
+      if (!testRun.isFailed) {
         dependencyCache.put(fullTestName, returnValue)
         testRun.saveReturnValue(returnValue)
+      } else {
+        testRun.deleteReturnValue()
       }
 
       val response: InteractiveResponse = if (autoAccept && !result.passed) {
@@ -1000,13 +1003,14 @@ class TestRunner(config: RunConfig = RunConfig()) {
       logCapture.stop()
       testRun.writeReport(s"Test '${testCase.name}' completed in ${duration}ms")
 
-      // Cache return value (saves to testName.bin)
-      val autoAccept = config.recaptureAll || config.updateSnapshots
-      if (result.passed || (autoAccept && !testRun.isFailed)) {
+      // Cache return value on OK or DIFF, delete on FAIL
+      if (!testRun.isFailed) {
         this.synchronized {
           dependencyCache.put(fullTestName, returnValue)
           testRun.saveReturnValue(returnValue)
         }
+      } else {
+        testRun.deleteReturnValue()
       }
 
       // Store testRun reference for snapshot updates
