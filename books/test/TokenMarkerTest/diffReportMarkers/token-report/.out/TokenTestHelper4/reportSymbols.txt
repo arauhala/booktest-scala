@@ -1,0 +1,1 @@
+Test 'reportSymbols' completed in 0ms
