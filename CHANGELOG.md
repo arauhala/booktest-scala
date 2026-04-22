@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.3.7 (2026-04-22)
+
+### Bug fixes
+
+- **Always cache return values on OK/DIFF**: Previously .bin files were only
+  written when the test passed (snapshot matched) or in auto-accept mode.
+  Tests with DIFF status (new or changed snapshots) didn't persist their
+  return values, breaking dependent tests. Now matches Python booktest:
+  .bin is written whenever the test ran successfully (OK or DIFF), and
+  deleted on FAIL (exception/t.fail()).
+- **`assertln` fixed to match Python**: No longer throws on failure. Uses
+  `iln("ok")` on success (info-only) and `fln("FAILED")` on failure (marks
+  failed without throwing). Signature changed from `(label, condition)` to
+  `(condition, message)` to match Python.
+
+### Meta tests
+
+- **BinCacheTest**: .bin written on DIFF, deleted on FAIL, dependency
+  injection via .bin across runners
+- **TokenMarkerTest**: info tokens don't fail, checked tokens cause DIFF,
+  tokenizer alignment across feed calls, diff report markers
+
 ## 0.3.6 (2026-04-21)
 
 ### Tokenizer fix for `t.t("label..").iMsLn { block }` pattern
