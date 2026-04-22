@@ -225,7 +225,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
           }
           println()
           if (config.interactive) {
-            SnapshotManager.promptInteractive()
+            val isFailed = result.successState == SuccessState.FAIL
+            SnapshotManager.interact(testRun.snapshotFile, testRun.outFile, testRun.logFile, isFailed)
           } else {
             InteractiveResponse.Reject
           }
@@ -239,7 +240,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
         }
         InteractiveResponse.Reject
       } else if (!result.passed) {
-        SnapshotManager.printTestResult(result, config.interactive)
+        SnapshotManager.printTestResult(result, config.interactive,
+          testRun.snapshotFile, testRun.outFile, testRun.logFile)
       } else {
         println(s"${duration} ms")
         InteractiveResponse.Reject
@@ -659,58 +661,24 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
           // Interactive review for DIFF/FAIL tests
           if (config.interactive && !quit) {
-            var validInput = false
-            while (!validInput && !quit) {
-              print(s"  (a)ccept, (c)ontinue, (v)iew, (l)ogs, (d)iff, (aq) accept & quit or (q)uit? ")
-              val input = scala.io.StdIn.readLine()
-              if (input == null) {
+            val isFailed = caseReport.result == "FAIL"
+            val response = SnapshotManager.interact(snapshotFile, outFile, logFile, isFailed)
+
+            response match {
+              case InteractiveResponse.Accept =>
+                os.makeDir.all(snapshotFile / os.up)
+                os.copy.over(outFile, snapshotFile)
+                println(s"  ${LightGreen("Changes accepted.")}")
+                accepted += 1
+              case InteractiveResponse.AcceptAndQuit =>
+                os.makeDir.all(snapshotFile / os.up)
+                os.copy.over(outFile, snapshotFile)
+                println(s"  ${LightGreen("Changes accepted.")}")
+                accepted += 1
                 quit = true
-              } else {
-                input.trim.toLowerCase match {
-                  case "a" | "accept" =>
-                    os.makeDir.all(snapshotFile / os.up)
-                    os.copy.over(outFile, snapshotFile)
-                    println(s"  ${LightGreen("Changes accepted.")}")
-                    accepted += 1
-                    validInput = true
-                  case "c" | "continue" =>
-                    validInput = true
-                  case "v" | "view" =>
-                    println()
-                    output.linesIterator.foreach(line => println(s"  $line"))
-                    println()
-                  case "l" | "logs" =>
-                    if (os.exists(logFile)) {
-                      val log = os.read(logFile)
-                      if (log.trim.nonEmpty) {
-                        println()
-                        log.linesIterator.foreach(line => println(s"    $line"))
-                        println()
-                      } else {
-                        println(s"  ${LightCyan("(no logs)")}")
-                      }
-                    } else {
-                      println(s"  ${LightCyan("(no log file)")}")
-                    }
-                  case "d" | "diff" =>
-                    if (os.exists(snapshotFile)) {
-                      SnapshotManager.runDiffTool(snapshotFile, outFile)
-                    } else {
-                      println(s"  ${LightCyan("(no snapshot to diff against)")}")
-                    }
-                  case "aq" =>
-                    os.makeDir.all(snapshotFile / os.up)
-                    os.copy.over(outFile, snapshotFile)
-                    println(s"  ${LightGreen("Changes accepted. Quitting review.")}")
-                    accepted += 1
-                    validInput = true
-                    quit = true
-                  case "q" | "quit" =>
-                    quit = true
-                  case _ =>
-                    println(s"  ${LightRed("Invalid input.")}")
-                }
-              }
+              case InteractiveResponse.Quit =>
+                quit = true
+              case _ => // continue
             }
           }
         }

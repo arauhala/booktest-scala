@@ -222,49 +222,115 @@ object SnapshotManager {
     }
   }
 
-  def runDiffTool(expectedFile: os.Path, actualFile: os.Path): Unit = {
-    val tool = sys.env.getOrElse("BOOKTEST_DIFF_TOOL", "diff")
-    val cmd = s"$tool ${expectedFile} ${actualFile}"
-    os.proc("sh", "-c", cmd).call(
-      stdin = os.Inherit,
-      stdout = os.Inherit,
-      stderr = os.Inherit,
-      check = false
-    ).exitCode
+  /** Run an external tool from config/env.
+    * Resolution order: BOOKTEST_{TOOL_UPPER} env var, then default.
+    * Matches Python booktest's run_tool(). */
+  def runTool(toolName: String, args: String): Unit = {
+    val envKey = s"BOOKTEST_${toolName.toUpperCase}"
+    val defaults = Map(
+      "diff_tool" -> "diff",
+      "fast_diff_tool" -> "diff",
+      "md_viewer" -> "less",
+      "log_viewer" -> "less"
+    )
+    sys.env.get(envKey).orElse(defaults.get(toolName)) match {
+      case Some(cmd) =>
+        os.proc("sh", "-c", s"$cmd $args").call(
+          stdin = os.Inherit,
+          stdout = os.Inherit,
+          stderr = os.Inherit,
+          check = false
+        )
+      case None =>
+        println(s"  $toolName is not defined.")
+        println(s"  define it as env variable $envKey")
+    }
   }
 
-  def promptInteractive(): InteractiveResponse = {
+  /** Unified interactive prompt for both -i and -w modes.
+    * Matches Python booktest's interact() function.
+    *
+    * @param snapshotFile expected/snapshot file path
+    * @param outFile actual output file path
+    * @param logFile test log file path
+    * @param isFailed true if test has FAIL status (disables accept)
+    */
+  def interact(
+    snapshotFile: os.Path,
+    outFile: os.Path,
+    logFile: os.Path,
+    isFailed: Boolean = false
+  ): InteractiveResponse = {
     var response: InteractiveResponse = InteractiveResponse.Reject
-    var validInput = false
-    while (!validInput) {
-      print(s"  (a)ccept, (c)ontinue, (aq) accept & quit or (q)uit? ")
+    var done = false
+
+    while (!done) {
+      // Build options like Python: (a)ccept only if not FAIL
+      val options = List.newBuilder[String]
+      if (!isFailed) options += "(a)ccept"
+      options ++= List("(c)ontinue", "(q)uit", "(v)iew", "(l)ogs", "(d)iff")
+      if (!isFailed) options += "(aq) accept & quit"
+      val optList = options.result()
+      val prompt = optList.dropRight(1).mkString(", ") + " or " + optList.last + "? "
+
+      print(s"  $prompt")
       val input = scala.io.StdIn.readLine()
+
       if (input == null) {
         response = InteractiveResponse.Quit
-        validInput = true
+        done = true
       } else {
         input.trim.toLowerCase match {
-          case "a" | "accept" =>
+          case "a" | "accept" if !isFailed =>
             response = InteractiveResponse.Accept
-            validInput = true
+            done = true
           case "c" | "continue" | "" =>
             response = InteractiveResponse.Reject
-            validInput = true
-          case "aq" =>
-            response = InteractiveResponse.AcceptAndQuit
-            validInput = true
+            done = true
           case "q" | "quit" =>
             response = InteractiveResponse.Quit
-            validInput = true
+            done = true
+          case "aq" if !isFailed =>
+            response = InteractiveResponse.AcceptAndQuit
+            done = true
+          case "v" | "view" =>
+            if (os.exists(snapshotFile) && os.exists(outFile)) {
+              runTool("md_viewer", s"$snapshotFile $outFile")
+            } else if (os.exists(outFile)) {
+              runTool("md_viewer", s"$outFile")
+            } else {
+              println(s"  (no output file)")
+            }
+          case "l" | "logs" =>
+            if (os.exists(logFile)) {
+              val log = os.read(logFile)
+              if (log.trim.nonEmpty) {
+                println()
+                log.linesIterator.foreach(line => println(s"    $line"))
+                println()
+              } else {
+                println(s"  (no logs)")
+              }
+            } else {
+              println(s"  (no log file)")
+            }
+          case "d" | "diff" =>
+            if (os.exists(snapshotFile)) {
+              runTool("diff_tool", s"$snapshotFile $outFile")
+            } else {
+              println(s"  (no snapshot to diff against)")
+            }
           case _ =>
-            println(LightRed("  Invalid input. Please enter 'a', 'c', 'aq', or 'q'."))
+            println(s"  Invalid input.")
         }
       }
     }
     response
   }
 
-  def printTestResult(result: TestResult, interactive: Boolean = false): InteractiveResponse = {
+  def printTestResult(result: TestResult, interactive: Boolean = false,
+                      snapshotFile: os.Path = null, outFile: os.Path = null,
+                      logFile: os.Path = null): InteractiveResponse = {
     if (result.passed) {
       println(LightGreen(s"✓ ${result.testName}"))
       InteractiveResponse.Reject
@@ -276,8 +342,9 @@ object SnapshotManager {
         println()
       }
 
-      if (interactive) {
-        promptInteractive()
+      if (interactive && snapshotFile != null && outFile != null && logFile != null) {
+        val isFailed = result.successState == SuccessState.FAIL
+        interact(snapshotFile, outFile, logFile, isFailed)
       } else {
         InteractiveResponse.Reject
       }
