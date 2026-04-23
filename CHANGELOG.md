@@ -1,6 +1,18 @@
 # Changelog
 
-## 0.3.7 (2026-04-22)
+## 0.3.7 (2026-04-23)
+
+### Unified interactive review
+
+- **Single `interact()` function** for both `-i` and `-w` modes, matching
+  Python booktest. Previously `-i` mode only had `a/c/q`, now both modes
+  support all options: `(a)ccept`, `(c)ontinue`, `(q)uit`, `(v)iew`,
+  `(l)ogs`, `(d)iff`, `(aq)` accept & quit.
+- **`(a)ccept` hidden on FAIL** tests (matches Python — can't accept a
+  test that threw an exception).
+- **`runTool()`** for launching external tools, matching Python's
+  `run_tool()`. Resolves from `BOOKTEST_{TOOL}` env vars with defaults
+  (`diff` for diff_tool, `less` for viewers).
 
 ### Bug fixes
 

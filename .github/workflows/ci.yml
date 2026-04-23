@@ -33,7 +33,7 @@ jobs:
         run: sbt ++3.3.1 "Test/runMain booktest.BooktestMain -p4 examples"
 
       - name: Run meta tests
-        run: sbt ++3.3.1 "Test/runMain booktest.BooktestMain booktest.test.ContinueModeTest booktest.test.BinCacheTest booktest.test.TokenMarkerTest"
+        run: sbt ++3.3.1 "Test/runMain booktest.BooktestMain test"
 
   cross-compile:
     runs-on: ubuntu-latest
