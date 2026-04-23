@@ -137,8 +137,9 @@ object BooktestMain {
       // No args: run default with exclude patterns applied
       booktestConfig.defaultTests match {
         case Some(defaultPath) =>
-          val fullPath = booktestConfig.resolvePath(defaultPath)
-          val discovered = discoverTestSuites(fullPath)
+          // Support comma-separated list (e.g., "examples, test")
+          val paths = defaultPath.split(",").map(_.trim).filter(_.nonEmpty)
+          val discovered = paths.flatMap(p => discoverTestSuites(booktestConfig.resolvePath(p))).toList
           // Apply exclude patterns for default runs
           discovered.filterNot(s => booktestConfig.isExcluded(s.fullClassName))
         case None =>
@@ -550,77 +551,41 @@ object BooktestMain {
     * Uses the compiled class files in target/ to find all classes.
     */
   private def discoverTestSuites(packageName: String): List[TestSuite] = {
-    val classLoader = Thread.currentThread().getContextClassLoader
     val packagePath = packageName.replace('.', '/')
-
-    // Find all class files in the package
     val classNames = scala.collection.mutable.ListBuffer[String]()
 
-    // Try to find classes from the classpath
-    try {
-      val resources = classLoader.getResources(packagePath)
-      while (resources.hasMoreElements) {
-        val resource = resources.nextElement()
-        val path = resource.getPath
-        if (path.contains("target/scala")) {
-          // Scan the directory for .class files
-          val dir = new java.io.File(java.net.URLDecoder.decode(path, "UTF-8"))
-          if (dir.exists() && dir.isDirectory) {
-            scanClassDirectory(dir, packageName, classNames)
+    // Scan target directories for compiled class files
+    // Works with SBT's classloader which may not expose directories via getResources
+    val targetDir = os.pwd / "target"
+    if (os.exists(targetDir)) {
+      os.list(targetDir).filter(_.last.startsWith("scala-")).foreach { scalaDir =>
+        // Check both main classes and test-classes
+        for (classesDir <- List(scalaDir / "classes", scalaDir / "test-classes")) {
+          val packageDir = classesDir / os.RelPath(packagePath)
+          if (os.exists(packageDir) && os.isDir(packageDir)) {
+            scanClassDirectory(packageDir.toIO, packageName, classNames)
           }
         }
       }
-    } catch {
-      case _: Exception => // Ignore errors during discovery
-    }
-
-    // If no classes found via classpath, try hardcoded fallback for known packages
-    if (classNames.isEmpty && (packageName.startsWith("booktest.examples") || packageName.startsWith("booktest.test"))) {
-      classNames ++= getKnownTestClasses(packageName)
     }
 
     // Instantiate discovered classes that extend TestSuite
-    classNames.flatMap(loadTestSuite).toList
+    classNames.distinct.flatMap(loadTestSuite).toList
   }
 
   /** Recursively scan a directory for class files */
   private def scanClassDirectory(dir: java.io.File, packageName: String, classNames: scala.collection.mutable.ListBuffer[String]): Unit = {
-    dir.listFiles().foreach { file =>
-      if (file.isDirectory) {
-        scanClassDirectory(file, s"$packageName.${file.getName}", classNames)
-      } else if (file.getName.endsWith(".class") && !file.getName.contains("$")) {
-        val className = s"$packageName.${file.getName.dropRight(6)}"
-        classNames += className
+    val files = dir.listFiles()
+    if (files != null) {
+      files.foreach { file =>
+        if (file.isDirectory) {
+          scanClassDirectory(file, s"$packageName.${file.getName}", classNames)
+        } else if (file.getName.endsWith(".class") && !file.getName.contains("$")) {
+          val className = s"$packageName.${file.getName.dropRight(6)}"
+          classNames += className
+        }
       }
     }
-  }
-
-  /** Get known test classes for common packages (fallback when classpath scanning fails) */
-  private def getKnownTestClasses(packageName: String): List[String] = {
-    val allKnown = List(
-      // Meta tests (booktest testing booktest)
-      "booktest.test.ContinueModeTest",
-      // Example tests
-      "booktest.examples.ExampleTests",
-      "booktest.examples.DependencyTests",
-      "booktest.examples.MethodRefTests",
-      "booktest.examples.FailingTest",
-      "booktest.examples.MultiFail",
-      "booktest.examples.NewFeaturesTest",
-      "booktest.examples.InfoMethodsTest",
-      "booktest.examples.MetricsTest",
-      "booktest.examples.SnapshotCacheTest",
-      "booktest.examples.AsyncTest",
-      "booktest.examples.SetupTeardownTest",
-      "booktest.examples.DirectionConstraintsTest",
-      "booktest.examples.MarkersTest",
-      "booktest.examples.ImageTest",
-      "booktest.examples.TmpDirTest",
-      "booktest.examples.EnvSnapshotTests",
-      "booktest.examples.HttpSnapshotTests",
-      "booktest.examples.FunctionSnapshotTests"
-    )
-    allKnown.filter(_.startsWith(packageName))
   }
 
   /** Load a single TestSuite class by name */

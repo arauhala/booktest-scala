@@ -32,6 +32,18 @@ class BinCacheFailer extends TestSuite {
  */
 class BinCacheTest extends TestSuite {
 
+  /** Create a RunConfig with output redirected to a temp file */
+  private def quietConfig(tempDir: os.Path): RunConfig = {
+    val logStream = new java.io.PrintStream(
+      new java.io.FileOutputStream((tempDir / "runner.log").toIO))
+    RunConfig(
+      outputDir = tempDir,
+      snapshotDir = tempDir,
+      verbose = false,
+      output = logStream
+    )
+  }
+
   /** Find .bin files under a directory */
   private def findBinFiles(dir: os.Path): Seq[os.Path] = {
     if (os.exists(dir)) {
@@ -45,11 +57,7 @@ class BinCacheTest extends TestSuite {
     t.h1("Bin Cache: Written on Success")
 
     val tempDir = t.tmpDir("bin-success")
-    val config = RunConfig(
-      outputDir = tempDir,
-      snapshotDir = tempDir,
-      verbose = false
-    )
+    val config = quietConfig(tempDir)
     val runner = new TestRunner(config)
 
     // Run producer — will be DIFF (no snapshot exists) but should still write .bin
@@ -77,11 +85,7 @@ class BinCacheTest extends TestSuite {
     t.h1("Bin Cache: Deleted on Fail")
 
     val tempDir = t.tmpDir("bin-fail")
-    val config = RunConfig(
-      outputDir = tempDir,
-      snapshotDir = tempDir,
-      verbose = false
-    )
+    val config = quietConfig(tempDir)
 
     // Run the failing suite
     val runner = new TestRunner(config)
@@ -104,11 +108,7 @@ class BinCacheTest extends TestSuite {
     t.h1("Bin Cache: Dependency Injection")
 
     val tempDir = t.tmpDir("bin-deps")
-    val config = RunConfig(
-      outputDir = tempDir,
-      snapshotDir = tempDir,
-      verbose = false
-    )
+    val config = quietConfig(tempDir)
 
     // Run producer — creates .bin
     val runner1 = new TestRunner(config)

@@ -21,6 +21,7 @@ case class RunConfig(
   updateSnapshots: Boolean = false,  // -s: auto-accept snapshot changes
   continueMode: Boolean = false,  // -c: continue from last run, skip successful tests
   threads: Int = 1,  // -p N: number of threads for parallel execution
+  output: java.io.PrintStream = System.out,  // Output stream (redirect for meta tests)
   booktestConfig: BooktestConfig = BooktestConfig.empty  // test-root and groups config
 ) {
   /** Get the test path for a suite, applying test-root stripping */
@@ -52,19 +53,19 @@ case class RunResult(
     }
   }
 
-  def printSummary(): Unit = {
-    println()
+  def printSummary(out: java.io.PrintStream = System.out): Unit = {
+    out.println()
     if (success) {
-      println(summary)
+      out.println(summary)
     } else {
-      println(s"$summary:")
-      println()
+      out.println(s"$summary:")
+      out.println()
       results.filter(!_.passed).foreach { r =>
         val status = r.successState match {
           case SuccessState.FAIL => LightRed("FAIL")
           case _ => LightYellow("DIFF")
         }
-        println(s"  ${r.testName} - $status")
+        out.println(s"  ${r.testName} - $status")
       }
     }
   }
@@ -74,6 +75,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
   private val dependencyCache = new DependencyCache()
   private val resourceManager = ResourceManager.fromEnv()
   @volatile private var interactiveQuit = false
+  private val out = config.output
 
   /** Get the resource manager for tests that need ports/resources */
   def resources: ResourceManager = resourceManager
@@ -119,10 +121,10 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
     // Print test name before capture starts
     if (!config.verbose) {
-      print(s"  ${fullTestName}..")
+      out.print(s"  ${fullTestName}..")
     } else {
-      println(s"test $fullTestName")
-      println()
+      out.println(s"test $fullTestName")
+      out.println()
     }
 
     // Acquire resource locks (for tests that share state)
@@ -201,31 +203,32 @@ class TestRunner(config: RunConfig = RunConfig()) {
         if (config.verbose) {
           // Print test output in verbose mode
           printVerboseOutput(testRun)
-          println(s"$fullTestName ${LightYellow("UPDATED")} ${duration} ms.")
-          println()
+          out.println(s"$fullTestName ${LightYellow("UPDATED")} ${duration} ms.")
+          out.println()
         } else if (config.summaryMode) {
-          println(s"${LightYellow("UPDATED")} ${duration} ms")
+          out.println(s"${LightYellow("UPDATED")} ${duration} ms")
         } else {
-          println(s"${LightYellow("snapshot updated")} ${duration} ms")
+          out.println(s"${LightYellow("snapshot updated")} ${duration} ms")
         }
         InteractiveResponse.Accept
       } else if (config.verbose) {
         // Verbose mode: show test output content like Python
         printVerboseOutput(testRun)
         if (result.passed) {
-          println(s"$fullTestName ${LightGreen("ok")} ${duration} ms.")
-          println()
+          out.println(s"$fullTestName ${LightGreen("ok")} ${duration} ms.")
+          out.println()
           InteractiveResponse.Reject
         } else {
-          println(s"$fullTestName ${LightYellow("DIFF")} ${duration} ms.")
+          out.println(s"$fullTestName ${LightYellow("DIFF")} ${duration} ms.")
           // Show diff inline in verbose mode
           result.diff.foreach { diff =>
-            println()
-            println(diff)
+            out.println()
+            out.println(diff)
           }
-          println()
+          out.println()
           if (config.interactive) {
-            SnapshotManager.promptInteractive()
+            val isFailed = result.successState == SuccessState.FAIL
+            SnapshotManager.interact(testRun.snapshotFile, testRun.outFile, testRun.logFile, isFailed)
           } else {
             InteractiveResponse.Reject
           }
@@ -233,15 +236,16 @@ class TestRunner(config: RunConfig = RunConfig()) {
       } else if (config.summaryMode) {
         // Python-style: show status inline, collect diffs for end
         if (result.passed) {
-          println(s"${LightGreen("ok")} ${duration} ms")
+          out.println(s"${LightGreen("ok")} ${duration} ms")
         } else {
-          println(s"${LightYellow("DIFF")} ${duration} ms")
+          out.println(s"${LightYellow("DIFF")} ${duration} ms")
         }
         InteractiveResponse.Reject
       } else if (!result.passed) {
-        SnapshotManager.printTestResult(result, config.interactive)
+        SnapshotManager.printTestResult(result, config.interactive,
+          testRun.snapshotFile, testRun.outFile, testRun.logFile)
       } else {
-        println(s"${duration} ms")
+        out.println(s"${duration} ms")
         InteractiveResponse.Reject
       }
 
@@ -276,17 +280,17 @@ class TestRunner(config: RunConfig = RunConfig()) {
           val output = testRun.getTestOutput
           if (output.nonEmpty) {
             output.linesIterator.foreach { line =>
-              println(s"  $line")
+              out.println(s"  $line")
             }
-            println()
+            out.println()
           }
-          println(s"$suiteName/${testCase.name} ${LightRed("FAIL")} ${duration} ms.")
-          println()
-          println(LightRed(errorMessage))
+          out.println(s"$suiteName/${testCase.name} ${LightRed("FAIL")} ${duration} ms.")
+          out.println()
+          out.println(LightRed(errorMessage))
           e.printStackTrace()
-          println()
+          out.println()
         } else {
-          println(s"FAILED in ${duration} ms")
+          out.println(s"FAILED in ${duration} ms")
         }
 
         TestResult(
@@ -306,9 +310,9 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val startTime = System.currentTimeMillis()
 
     // Print header
-    println()
-    println("# test results:")
-    println()
+    out.println()
+    out.println("# test results:")
+    out.println()
 
     // Load previous case reports for continue mode
     val outDir = config.outputDir / ".out"
@@ -332,8 +336,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
     // Track results from skipped tests (continue mode)
     val skippedResults = if (config.continueMode && doneCaseReports.nonEmpty) {
-      println(LightCyan(s"Continue mode: skipping ${doneCaseReports.length} successful tests"))
-      println()
+      out.println(LightCyan(s"Continue mode: skipping ${doneCaseReports.length} successful tests"))
+      out.println()
       doneCaseReports.map { report =>
         TestResult(
           testName = report.testName,
@@ -414,22 +418,22 @@ class TestRunner(config: RunConfig = RunConfig()) {
   private def printCollectedDiffs(results: List[TestResult]): Unit = {
     val failedResults = results.filter(!_.passed)
     if (failedResults.nonEmpty) {
-      println()
-      println("=" * 60)
-      println(LightRed(s"# ${failedResults.length} test(s) with differences:"))
-      println("=" * 60)
+      out.println()
+      out.println("=" * 60)
+      out.println(LightRed(s"# ${failedResults.length} test(s) with differences:"))
+      out.println("=" * 60)
 
       failedResults.foreach { result =>
-        println()
-        println(LightYellow(s"## ${result.testName}"))
-        println("-" * 40)
+        out.println()
+        out.println(LightYellow(s"## ${result.testName}"))
+        out.println("-" * 40)
         result.diff.foreach { diff =>
-          println(diff)
+          out.println(diff)
         }
       }
 
-      println()
-      println("=" * 60)
+      out.println()
+      out.println("=" * 60)
     }
   }
 
@@ -510,7 +514,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       suite.getBeforeAll()
     } catch {
       case e: Exception =>
-        println(s"Warning: beforeAll failed for $suiteName: ${e.getMessage}")
+        out.println(s"Warning: beforeAll failed for $suiteName: ${e.getMessage}")
     }
 
     val results = try {
@@ -526,7 +530,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
         suite.getAfterAll()
       } catch {
         case e: Exception =>
-          println(s"Warning: afterAll failed for $suiteName: ${e.getMessage}")
+          out.println(s"Warning: afterAll failed for $suiteName: ${e.getMessage}")
       }
     }
 
@@ -579,7 +583,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val allReports = CaseReports.fromDir(outDir)
 
     if (allReports.cases.isEmpty) {
-      println("No previous test results found. Run tests first.")
+      out.println("No previous test results found. Run tests first.")
       return 1
     }
 
@@ -600,13 +604,13 @@ class TestRunner(config: RunConfig = RunConfig()) {
     }
 
     if (reports.cases.isEmpty) {
-      println("No matching test results found for the selected tests.")
+      out.println("No matching test results found for the selected tests.")
       return 0
     }
 
-    println()
-    println("# Review Results:")
-    println()
+    out.println()
+    out.println("# Review Results:")
+    out.println()
 
     var totalPassed = 0
     var totalFailed = 0
@@ -624,93 +628,59 @@ class TestRunner(config: RunConfig = RunConfig()) {
       val isPassed = caseReport.result == "OK"
 
       if (isPassed) {
-        println(s"  ${caseReport.testName}..${LightGreen("ok")} ${caseReport.durationMs} ms")
+        out.println(s"  ${caseReport.testName}..${LightGreen("ok")} ${caseReport.durationMs} ms")
         if (config.verbose && os.exists(outFile)) {
-          println()
+          out.println()
           os.read(outFile).linesIterator.foreach(line => println(s"  $line"))
-          println()
+          out.println()
         }
         totalPassed += 1
       } else {
         val statusColor = if (caseReport.result == "FAIL") LightRed("FAIL") else LightYellow("DIFF")
-        println(s"  ${caseReport.testName}..$statusColor ${caseReport.durationMs} ms")
+        out.println(s"  ${caseReport.testName}..$statusColor ${caseReport.durationMs} ms")
 
         if (os.exists(outFile)) {
           val output = os.read(outFile)
           val snapshot = if (os.exists(snapshotFile)) Some(os.read(snapshotFile)) else None
 
           if (config.verbose) {
-            println()
+            out.println()
             output.linesIterator.foreach(line => println(s"  $line"))
-            println()
+            out.println()
           }
 
           snapshot match {
             case Some(snap) if snap != output =>
               val diff = SnapshotManager.generateDiff(snap, output)
-              println(diff)
-              println()
+              out.println(diff)
+              out.println()
             case None =>
-              println(s"  No snapshot found for test '${caseReport.testName}'")
-              println()
+              out.println(s"  No snapshot found for test '${caseReport.testName}'")
+              out.println()
             case _ =>
-              println()
+              out.println()
           }
 
           // Interactive review for DIFF/FAIL tests
           if (config.interactive && !quit) {
-            var validInput = false
-            while (!validInput && !quit) {
-              print(s"  (a)ccept, (c)ontinue, (v)iew, (l)ogs, (d)iff, (aq) accept & quit or (q)uit? ")
-              val input = scala.io.StdIn.readLine()
-              if (input == null) {
+            val isFailed = caseReport.result == "FAIL"
+            val response = SnapshotManager.interact(snapshotFile, outFile, logFile, isFailed)
+
+            response match {
+              case InteractiveResponse.Accept =>
+                os.makeDir.all(snapshotFile / os.up)
+                os.copy.over(outFile, snapshotFile)
+                out.println(s"  ${LightGreen("Changes accepted.")}")
+                accepted += 1
+              case InteractiveResponse.AcceptAndQuit =>
+                os.makeDir.all(snapshotFile / os.up)
+                os.copy.over(outFile, snapshotFile)
+                out.println(s"  ${LightGreen("Changes accepted.")}")
+                accepted += 1
                 quit = true
-              } else {
-                input.trim.toLowerCase match {
-                  case "a" | "accept" =>
-                    os.makeDir.all(snapshotFile / os.up)
-                    os.copy.over(outFile, snapshotFile)
-                    println(s"  ${LightGreen("Changes accepted.")}")
-                    accepted += 1
-                    validInput = true
-                  case "c" | "continue" =>
-                    validInput = true
-                  case "v" | "view" =>
-                    println()
-                    output.linesIterator.foreach(line => println(s"  $line"))
-                    println()
-                  case "l" | "logs" =>
-                    if (os.exists(logFile)) {
-                      val log = os.read(logFile)
-                      if (log.trim.nonEmpty) {
-                        println()
-                        log.linesIterator.foreach(line => println(s"    $line"))
-                        println()
-                      } else {
-                        println(s"  ${LightCyan("(no logs)")}")
-                      }
-                    } else {
-                      println(s"  ${LightCyan("(no log file)")}")
-                    }
-                  case "d" | "diff" =>
-                    if (os.exists(snapshotFile)) {
-                      SnapshotManager.runDiffTool(snapshotFile, outFile)
-                    } else {
-                      println(s"  ${LightCyan("(no snapshot to diff against)")}")
-                    }
-                  case "aq" =>
-                    os.makeDir.all(snapshotFile / os.up)
-                    os.copy.over(outFile, snapshotFile)
-                    println(s"  ${LightGreen("Changes accepted. Quitting review.")}")
-                    accepted += 1
-                    validInput = true
-                    quit = true
-                  case "q" | "quit" =>
-                    quit = true
-                  case _ =>
-                    println(s"  ${LightRed("Invalid input.")}")
-                }
-              }
+              case InteractiveResponse.Quit =>
+                quit = true
+              case _ => // continue
             }
           }
         }
@@ -718,14 +688,14 @@ class TestRunner(config: RunConfig = RunConfig()) {
       }
     }
 
-    println()
+    out.println()
     val summary = if (totalFailed == 0) {
       LightGreen(s"$totalPassed/${totalPassed + totalFailed} test passed").toString
     } else {
       s"${LightRed(s"$totalFailed/${totalPassed + totalFailed} test failed")}" +
         (if (accepted > 0) s" ($accepted accepted)" else "")
     }
-    println(summary)
+    out.println(summary)
 
     if (totalFailed > 0 && totalFailed == accepted) 0
     else if (totalFailed > 0) 1
@@ -866,30 +836,30 @@ class TestRunner(config: RunConfig = RunConfig()) {
                 updateSnapshotForResult(result)
                 if (config.verbose) {
                   printVerboseResultOutput(result)
-                  println(s"${result.testName} ${LightYellow("UPDATED")} ${result.durationMs} ms.")
-                  println()
+                  out.println(s"${result.testName} ${LightYellow("UPDATED")} ${result.durationMs} ms.")
+                  out.println()
                 } else {
-                  println(s"  ${result.testName}..${LightYellow("UPDATED")} ${result.durationMs} ms")
+                  out.println(s"  ${result.testName}..${LightYellow("UPDATED")} ${result.durationMs} ms")
                 }
                 result.copy(passed = true)
               } else if (config.verbose) {
                 printVerboseResultOutput(result)
                 if (result.passed) {
-                  println(s"${result.testName} ${LightGreen("ok")} ${result.durationMs} ms.")
+                  out.println(s"${result.testName} ${LightGreen("ok")} ${result.durationMs} ms.")
                 } else {
-                  println(s"${result.testName} ${LightYellow("DIFF")} ${result.durationMs} ms.")
+                  out.println(s"${result.testName} ${LightYellow("DIFF")} ${result.durationMs} ms.")
                   result.diff.foreach { diff =>
-                    println()
-                    println(diff)
+                    out.println()
+                    out.println(diff)
                   }
                 }
-                println()
+                out.println()
                 result
               } else if (result.passed) {
-                println(s"  ${result.testName}..${LightGreen("ok")} ${result.durationMs} ms")
+                out.println(s"  ${result.testName}..${LightGreen("ok")} ${result.durationMs} ms")
                 result
               } else {
-                println(s"  ${result.testName}..${LightYellow("DIFF")} ${result.durationMs} ms")
+                out.println(s"  ${result.testName}..${LightYellow("DIFF")} ${result.durationMs} ms")
                 result
               }
 
@@ -1050,9 +1020,9 @@ class TestRunner(config: RunConfig = RunConfig()) {
       val output = testRun.getTestOutput
       if (output.nonEmpty) {
         output.linesIterator.foreach { line =>
-          println(s"  $line")
+          out.println(s"  $line")
         }
-        println()
+        out.println()
       }
     }
   }
@@ -1104,12 +1074,12 @@ class TestRunner(config: RunConfig = RunConfig()) {
         } else {
           // Has dependencies - need to inject cached values
           if (config.verbose) {
-            println(s"    Looking for dependencies: ${testCase.dependencies}")
+            out.println(s"    Looking for dependencies: ${testCase.dependencies}")
           }
           val dependencyValues = testCase.dependencies.map { depName =>
             val cached = loadDependencyValue(depName, suitePath, testRun)
             if (config.verbose) {
-              println(s"    Dependency '$depName': ${cached.isDefined}")
+              out.println(s"    Dependency '$depName': ${cached.isDefined}")
             }
             cached.getOrElse {
               throw new IllegalStateException(s"Dependency '$depName' not found in cache for test '${testCase.name}'")
@@ -1142,12 +1112,12 @@ class TestRunner(config: RunConfig = RunConfig()) {
             } else {
               // Has dependencies - need to inject cached values
               if (config.verbose) {
-                println(s"    Looking for dependencies: ${testCase.dependencies}")
+                out.println(s"    Looking for dependencies: ${testCase.dependencies}")
               }
               val dependencyValues = testCase.dependencies.map { depName =>
                 val cached = loadDependencyValue(depName, suitePath, testRun)
                 if (config.verbose) {
-                  println(s"    Dependency '$depName': ${cached.isDefined}")
+                  out.println(s"    Dependency '$depName': ${cached.isDefined}")
                 }
                 cached.getOrElse {
                   throw new IllegalStateException(s"Dependency '$depName' not found in cache for test '${testCase.name}'")
@@ -1172,9 +1142,9 @@ class TestRunner(config: RunConfig = RunConfig()) {
     if (output.nonEmpty) {
       // Indent each line with 2 spaces for readability
       output.linesIterator.foreach { line =>
-        println(s"  $line")
+        out.println(s"  $line")
       }
-      println()
+      out.println()
     }
   }
 }
