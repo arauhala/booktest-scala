@@ -22,6 +22,7 @@ case class RunConfig(
   continueMode: Boolean = false,  // -c: continue from last run, skip successful tests
   threads: Int = 1,  // -p N: number of threads for parallel execution
   output: java.io.PrintStream = System.out,  // Output stream (redirect for meta tests)
+  exactFilter: Boolean = false,  // true when filter comes from path resolution (SuiteName/testCase)
   booktestConfig: BooktestConfig = BooktestConfig.empty  // test-root and groups config
 ) {
   /** Get the test path for a suite, applying test-root stripping */
@@ -468,10 +469,16 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val suitePath = config.getSuitePath(fullClassName)
     val testCases = suite.testCases
 
-    // Step 1: Apply name pattern filter, but include transitive dependencies
+    // Step 1: Apply name filter, but include transitive dependencies.
+    // exactFilter: exact match (from path resolution like SuiteName/testCase)
+    // non-exact: contains match (from -t flag for grep-like convenience)
     val filteredTests = config.testFilter match {
       case Some(pattern) =>
-        val matched = testCases.filter(_.name.contains(pattern)).map(_.name).toSet
+        val matched = if (config.exactFilter) {
+          testCases.filter(_.name == pattern).map(_.name).toSet
+        } else {
+          testCases.filter(_.name.contains(pattern)).map(_.name).toSet
+        }
         val testMap = testCases.map(tc => tc.name -> tc).toMap
         val needed = scala.collection.mutable.LinkedHashSet[String]()
         def collectDeps(name: String): Unit = {
