@@ -13,6 +13,7 @@ object BooktestMain {
     var outputDir = "books"
     var snapshotDir = "books"
     var testFilter: Option[String] = None
+    var exactFilter = false
     var listTests = false
     var showLogs = false
     var reviewMode = false
@@ -196,6 +197,7 @@ object BooktestMain {
           val suiteResolved = resolveArg(suitePart)
           if (suiteResolved.nonEmpty) {
             testFilter = Some(testPart)
+            exactFilter = true
             suiteResolved
           } else {
             Nil
@@ -208,7 +210,7 @@ object BooktestMain {
     
     // Update config if testFilter was set during SuiteName/testCase resolution
     if (testFilter != config.testFilter) {
-      config = config.copy(testFilter = testFilter)
+      config = config.copy(testFilter = testFilter, exactFilter = exactFilter)
     }
 
     if (suites.isEmpty) {
