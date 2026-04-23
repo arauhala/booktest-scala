@@ -4,14 +4,20 @@ import booktest._
 
 /**
  * Meta test: Verifies token-level diff/info/fail marking.
- *
- * Tests that:
- * - t() tokens that differ from snapshot produce diff markers (test failure)
- * - i() tokens that differ from snapshot produce info markers (no failure)
- * - Mixed t()/i() on the same line correctly distinguishes checked vs info
- * - Tokenizer alignment works across separate feed calls
  */
 class TokenMarkerTest extends TestSuite {
+
+  /** Create a RunConfig with output redirected to a temp file */
+  private def quietConfig(tempDir: os.Path, snapshotDir: os.Path): RunConfig = {
+    val logStream = new java.io.PrintStream(
+      new java.io.FileOutputStream((tempDir / "runner.log").toIO))
+    RunConfig(
+      outputDir = tempDir,
+      snapshotDir = snapshotDir,
+      verbose = false,
+      output = logStream
+    )
+  }
 
   def testInfoTokensDontFail(t: TestCaseRun): Unit = {
     t.h1("Token Markers: Info Tokens Don't Fail")
@@ -19,23 +25,15 @@ class TokenMarkerTest extends TestSuite {
     val tempDir = t.tmpDir("token-info")
     val snapshotDir = tempDir / "snapshots" / "TokenTestHelper"
     os.makeDir.all(snapshotDir)
-
-    // Create a snapshot with timing info (test name has "test" prefix stripped)
     os.write(snapshotDir / "mixedLine.md", "label..99ms\n")
 
-    val config = RunConfig(
-      outputDir = tempDir,
-      snapshotDir = tempDir / "snapshots",
-      verbose = false
-    )
+    val config = quietConfig(tempDir, tempDir / "snapshots")
 
-    // Create a helper suite that outputs the same label with different timing
     val suite = new TestSuite {
       override def suiteName: String = "TokenTestHelper"
       override def fullClassName: String = "TokenTestHelper"
 
       def testMixedLine(tc: TestCaseRun): Unit = {
-        // "label.." is checked, "42ms" is info — timing differs from snapshot "99ms"
         tc.t("label..")
         tc.iln("42ms")
       }
@@ -48,7 +46,6 @@ class TokenMarkerTest extends TestSuite {
     t.tln(s"test passed: ${testResult.passed}")
     t.tln(s"test state: ${testResult.successState}")
 
-    // The test should pass — label matches, timing is info-only
     assert(testResult.successState == SuccessState.OK,
       s"Expected OK (info-only diff), got ${testResult.successState}")
 
@@ -61,15 +58,9 @@ class TokenMarkerTest extends TestSuite {
     val tempDir = t.tmpDir("token-checked")
     val snapshotDir = tempDir / "snapshots" / "TokenTestHelper2"
     os.makeDir.all(snapshotDir)
-
-    // Create a snapshot with specific content (test name has "test" prefix stripped)
     os.write(snapshotDir / "checkedDiff.md", "expected content\n")
 
-    val config = RunConfig(
-      outputDir = tempDir,
-      snapshotDir = tempDir / "snapshots",
-      verbose = false
-    )
+    val config = quietConfig(tempDir, tempDir / "snapshots")
 
     val suite = new TestSuite {
       override def suiteName: String = "TokenTestHelper2"
@@ -99,22 +90,15 @@ class TokenMarkerTest extends TestSuite {
     val tempDir = t.tmpDir("token-alignment")
     val snapshotDir = tempDir / "snapshots" / "TokenTestHelper3"
     os.makeDir.all(snapshotDir)
-
-    // Snapshot has "step..55ms" — the ".55" should NOT be tokenized as decimal number
     os.write(snapshotDir / "alignment.md", "step..55ms\ndone\n")
 
-    val config = RunConfig(
-      outputDir = tempDir,
-      snapshotDir = tempDir / "snapshots",
-      verbose = false
-    )
+    val config = quietConfig(tempDir, tempDir / "snapshots")
 
     val suite = new TestSuite {
       override def suiteName: String = "TokenTestHelper3"
       override def fullClassName: String = "TokenTestHelper3"
 
       def testAlignment(tc: TestCaseRun): Unit = {
-        // "step.." via testFeed, "23ms\n" via infoFeed — different timing
         tc.t("step..")
         tc.iln("23ms")
         tc.tln("done")
@@ -128,7 +112,6 @@ class TokenMarkerTest extends TestSuite {
     t.tln(s"test passed: ${testResult.passed}")
     t.tln(s"test state: ${testResult.successState}")
 
-    // Should be OK — "step" and ".." match, timing is info-only, "done" matches
     assert(testResult.successState == SuccessState.OK,
       s"Expected OK (timing is info-only), got ${testResult.successState}")
 
@@ -141,15 +124,9 @@ class TokenMarkerTest extends TestSuite {
     val tempDir = t.tmpDir("token-report")
     val snapshotDir = tempDir / "snapshots" / "TokenTestHelper4"
     os.makeDir.all(snapshotDir)
-
-    // Snapshot with timing (test name has "test" prefix stripped)
     os.write(snapshotDir / "reportSymbols.md", "label..77ms\nchecked line\n")
 
-    val config = RunConfig(
-      outputDir = tempDir,
-      snapshotDir = tempDir / "snapshots",
-      verbose = false
-    )
+    val config = quietConfig(tempDir, tempDir / "snapshots")
 
     val suite = new TestSuite {
       override def suiteName: String = "TokenTestHelper4"
@@ -157,8 +134,8 @@ class TokenMarkerTest extends TestSuite {
 
       def testReportSymbols(tc: TestCaseRun): Unit = {
         tc.t("label..")
-        tc.iln("22ms")       // info diff — should show as . (cyan)
-        tc.tln("changed line")  // checked diff — should show as ? (yellow)
+        tc.iln("22ms")
+        tc.tln("changed line")
       }
     }
 
@@ -168,15 +145,12 @@ class TokenMarkerTest extends TestSuite {
 
     t.tln(s"test state: ${testResult.successState}")
 
-    // Should be DIFF because "changed line" != "checked line"
     assert(testResult.successState == SuccessState.DIFF,
       s"Expected DIFF, got ${testResult.successState}")
 
-    // Check the diff report contains the right markers
     testResult.diff.foreach { diff =>
-      // . for info-only line (timing), ? for checked diff line
-      val hasInfoMarker = diff.contains(".")  // cyan info marker
-      val hasDiffMarker = diff.contains("?")  // yellow diff marker
+      val hasInfoMarker = diff.contains(".")
+      val hasDiffMarker = diff.contains("?")
       t.tln(s"diff has info marker (.): $hasInfoMarker")
       t.tln(s"diff has diff marker (?): $hasDiffMarker")
     }
