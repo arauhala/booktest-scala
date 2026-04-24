@@ -74,7 +74,7 @@ object SnapshotManager {
           case Some(snapshotContent) if testOutput.trim != snapshotContent.trim =>
             Some(generateDiff(snapshotContent, testOutput, diffMode))
           case None =>
-            Some(s"No snapshot found for test '${testRun.testName}'")
+            None  // First run - no snapshot yet, DIFF status is sufficient
           case _ if hasErrors =>
             testRun.failMessage.map(m => s"Test explicitly failed: $m")
           case _ =>
@@ -259,7 +259,8 @@ object SnapshotManager {
     snapshotFile: os.Path,
     outFile: os.Path,
     logFile: os.Path,
-    isFailed: Boolean = false
+    isFailed: Boolean = false,
+    testName: String = ""
   ): InteractiveResponse = {
     var response: InteractiveResponse = InteractiveResponse.Reject
     var done = false
@@ -273,7 +274,12 @@ object SnapshotManager {
       val optList = options.result()
       val prompt = optList.dropRight(1).mkString(", ") + " or " + optList.last + "? "
 
-      print(s"  $prompt")
+      // Print test name before prompt (like Python) so user knows which test after long output
+      if (testName.nonEmpty) {
+        print(s"  $testName..$prompt")
+      } else {
+        print(s"  $prompt")
+      }
       val input = scala.io.StdIn.readLine()
 
       if (input == null) {
@@ -344,7 +350,7 @@ object SnapshotManager {
 
       if (interactive && snapshotFile != null && outFile != null && logFile != null) {
         val isFailed = result.successState == SuccessState.FAIL
-        interact(snapshotFile, outFile, logFile, isFailed)
+        interact(snapshotFile, outFile, logFile, isFailed, result.testName)
       } else {
         InteractiveResponse.Reject
       }

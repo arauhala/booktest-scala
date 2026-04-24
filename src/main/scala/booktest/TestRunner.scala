@@ -19,6 +19,7 @@ case class RunConfig(
   summaryMode: Boolean = true,  // Python-style: show diffs at end (default)
   recaptureAll: Boolean = false,  // -S: force regenerate all snapshots
   updateSnapshots: Boolean = false,  // -s: auto-accept snapshot changes
+  autoAcceptDiff: Boolean = false,  // -a: auto-accept DIFF tests (not FAIL)
   continueMode: Boolean = false,  // -c: continue from last run, skip successful tests
   threads: Int = 1,  // -p N: number of threads for parallel execution
   output: java.io.PrintStream = System.out,  // Output stream (redirect for meta tests)
@@ -143,7 +144,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       }
 
       val returnValue = try {
-        executeTestWithDependencies(testCase, testRun, suitePath)
+        executeTestWithDependencies(testCase, testRun, suitePath, suite)
       } finally {
         // Call teardown hook (always, even if test fails)
         if (suite != null) {
@@ -185,8 +186,9 @@ class TestRunner(config: RunConfig = RunConfig()) {
       // Write report file
       testRun.writeReport(s"Test '${testCase.name}' completed in ${duration}ms")
 
-      // Handle -S (recapture all) and -s (update snapshots) flags
-      val autoAccept = config.recaptureAll || config.updateSnapshots
+      // Handle -S (recapture all), -s (update snapshots), -a (accept diffs) flags
+      val autoAccept = config.recaptureAll || config.updateSnapshots ||
+        (config.autoAcceptDiff && result.successState == SuccessState.DIFF)
 
       // Cache the return value on OK or DIFF (test ran successfully).
       // On FAIL (exception/t.fail()), delete any stale .bin file.
@@ -228,7 +230,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
           out.println()
           if (config.interactive) {
             val isFailed = result.successState == SuccessState.FAIL
-            SnapshotManager.interact(testRun.snapshotFile, testRun.outFile, testRun.logFile, isFailed)
+            SnapshotManager.interact(testRun.snapshotFile, testRun.outFile, testRun.logFile, isFailed, fullTestName)
           } else {
             InteractiveResponse.Reject
           }
@@ -263,6 +265,14 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
     } catch {
       case e: Exception =>
+        // Write exception to output like Python: t.iln(traceback.format_exc())
+        testRun.iln()
+        testRun.fail()
+        testRun.iln(s"test raised exception ${e.getClass.getName}: ${e.getMessage}")
+        val sw = new java.io.StringWriter()
+        e.printStackTrace(new java.io.PrintWriter(sw))
+        testRun.iln(sw.toString)
+
         // Finalize output on error
         testRun.end()
         // Stop log capture on error
@@ -270,34 +280,33 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
         val endTime = System.currentTimeMillis()
         val duration = endTime - startTime
+
+        // Compare snapshot (exception is now part of output)
+        val snapshotResult = SnapshotManager.compareTest(testRun, config.diffMode)
         val errorMessage = s"Test '${testCase.name}' failed with exception: ${e.getMessage}"
 
         // Write error report
         testRun.writeReport(s"Test '${testCase.name}' FAILED: ${e.getMessage}\nDuration: ${duration}ms")
 
+        // Delete cached return value on failure
+        testRun.deleteReturnValue()
+
         if (config.verbose) {
-          // Print any partial output in verbose mode
-          val output = testRun.getTestOutput
-          if (output.nonEmpty) {
-            output.linesIterator.foreach { line =>
-              out.println(s"  $line")
-            }
-            out.println()
-          }
+          // Print test output in verbose mode
+          printVerboseOutput(testRun)
           out.println(s"$suiteName/${testCase.name} ${LightRed("FAIL")} ${duration} ms.")
           out.println()
           out.println(LightRed(errorMessage))
-          e.printStackTrace()
           out.println()
         } else {
           out.println(s"FAILED in ${duration} ms")
         }
 
-        TestResult(
+        snapshotResult.copy(
           testName = fullTestName,
           passed = false,
-          output = "",
-          diff = Some(errorMessage),
+          successState = SuccessState.FAIL,
+          diff = snapshotResult.diff.orElse(Some(errorMessage)),
           durationMs = duration
         )
     } finally {
@@ -439,7 +448,9 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
   private def writeCaseReports(results: List[TestResult]): Unit = {
     val caseReports = results.map { result =>
-      val status = if (result.passed) "OK" else "DIFF"
+      val status = if (result.passed) "OK"
+        else if (result.successState == SuccessState.FAIL) "FAIL"
+        else "DIFF"
       // Store test name with suite prefix for proper review lookup
       val fullTestName = result.testName
       CaseReport(fullTestName, status, result.durationMs)
@@ -655,7 +666,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
               out.println(diff)
               out.println()
             case None =>
-              out.println(s"  No snapshot found for test '${caseReport.testName}'")
+              out.println(s"  (new test, no snapshot yet)")
               out.println()
             case _ =>
               out.println()
@@ -664,7 +675,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
           // Interactive review for DIFF/FAIL tests
           if (config.interactive && !quit) {
             val isFailed = caseReport.result == "FAIL"
-            val response = SnapshotManager.interact(snapshotFile, outFile, logFile, isFailed)
+            val response = SnapshotManager.interact(snapshotFile, outFile, logFile, isFailed, caseReport.testName)
 
             response match {
               case InteractiveResponse.Accept =>
@@ -938,7 +949,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       }
 
       val returnValue = try {
-        executeTestWithDependencies(testCase, testRun, suitePath)
+        executeTestWithDependencies(testCase, testRun, suitePath, suite)
       } finally {
         if (suite != null) {
           try { suite.getTeardown(testRun) }
@@ -1041,17 +1052,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       if (os.exists(depBinFile)) {
         try {
           val serialized = os.read(depBinFile)
-          val result: Any = serialized.split(":", 2) match {
-            case Array("NULL", _) => null
-            case Array("UNIT", _) => ()
-            case Array("STRING", value) => value
-            case Array("INT", value) => value.toInt
-            case Array("LONG", value) => value.toLong
-            case Array("DOUBLE", value) => value.toDouble
-            case Array("BOOLEAN", value) => value.toBoolean
-            case Array("OBJECT", value) => value
-            case _ => serialized
-          }
+          val result = testRun.deserializeCacheValue(serialized)
           // Cache in memory for subsequent lookups
           dependencyCache.put(qualifiedKey, result)
           Some(result)
@@ -1064,7 +1065,51 @@ class TestRunner(config: RunConfig = RunConfig()) {
     }
   }
 
-  private def executeTestWithDependencies(testCase: TestCase, testRun: TestCaseRun, suitePath: String = ""): Any = {
+  /** Resolve a dependency value, auto-running the dependency if its cached value is missing.
+    * Like Python booktest, acts as a build system: dependencies are run on demand.
+    */
+  private def resolveDependencyValue(
+    depName: String, suitePath: String, testRun: TestCaseRun,
+    suiteName: String, suite: TestSuite
+  ): Any = {
+    val cached = loadDependencyValue(depName, suitePath, testRun)
+    if (config.verbose) {
+      out.println(s"    Dependency '$depName': ${cached.isDefined}")
+    }
+    cached.getOrElse {
+      // Auto-run missing dependency (build-system behavior, like Python booktest)
+      if (suite != null) {
+        val depTestCase = suite.testCases.find(_.name == depName)
+        depTestCase match {
+          case Some(depTC) =>
+            if (config.verbose) {
+              out.println(s"    Auto-running missing dependency '$depName'...")
+            }
+            val depResult = runTestCase(depTC, suiteName, suite)
+            if (depResult.passed || depResult.successState == SuccessState.DIFF) {
+              // Dependency ran - try loading its cached value
+              loadDependencyValue(depName, suitePath, testRun).getOrElse {
+                throw new IllegalStateException(
+                  s"Dependency '$depName' was auto-run but produced no cached value for test '${testRun.testName}'")
+              }
+            } else {
+              throw new IllegalStateException(
+                s"Dependency '$depName' failed when auto-run for test '${testRun.testName}'")
+            }
+          case None =>
+            throw new IllegalStateException(
+              s"Dependency '$depName' not found in suite for test '${testRun.testName}'")
+        }
+      } else {
+        throw new IllegalStateException(
+          s"Dependency '$depName' not found in cache for test '${testRun.testName}'")
+      }
+    }
+  }
+
+  private def executeTestWithDependencies(testCase: TestCase, testRun: TestCaseRun, suitePath: String = "", suite: TestSuite = null): Any = {
+    val suiteName = if (suite != null) suite.fullClassName else ""
+
     testCase.originalFunction match {
       case Some(function) =>
         // New API: Use the stored function with proper type-safe dependency injection
@@ -1077,13 +1122,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
             out.println(s"    Looking for dependencies: ${testCase.dependencies}")
           }
           val dependencyValues = testCase.dependencies.map { depName =>
-            val cached = loadDependencyValue(depName, suitePath, testRun)
-            if (config.verbose) {
-              out.println(s"    Dependency '$depName': ${cached.isDefined}")
-            }
-            cached.getOrElse {
-              throw new IllegalStateException(s"Dependency '$depName' not found in cache for test '${testCase.name}'")
-            }
+            resolveDependencyValue(depName, suitePath, testRun, suiteName, suite)
           }
 
           // Call the function with proper arguments based on number of dependencies
@@ -1115,13 +1154,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
                 out.println(s"    Looking for dependencies: ${testCase.dependencies}")
               }
               val dependencyValues = testCase.dependencies.map { depName =>
-                val cached = loadDependencyValue(depName, suitePath, testRun)
-                if (config.verbose) {
-                  out.println(s"    Dependency '$depName': ${cached.isDefined}")
-                }
-                cached.getOrElse {
-                  throw new IllegalStateException(s"Dependency '$depName' not found in cache for test '${testCase.name}'")
-                }
+                resolveDependencyValue(depName, suitePath, testRun, suiteName, suite)
               }
 
               // Create arguments array: TestCaseRun + dependency values
