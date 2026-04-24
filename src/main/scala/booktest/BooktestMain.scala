@@ -22,6 +22,7 @@ object BooktestMain {
     var summaryMode = true // Python-style: diffs at end (default)
     var recaptureAll = false  // -S: force regenerate all snapshots
     var updateSnapshots = false  // -s: auto-accept snapshot changes
+    var autoAcceptDiff = false  // -a: auto-accept DIFF tests (not FAIL)
     var continueMode = false  // -c: continue from last run, skip successful tests
     var threads = 1  // -p N: number of threads for parallel execution
     var garbageMode = false  // --garbage: list orphan files
@@ -42,6 +43,7 @@ object BooktestMain {
         case "--inline" => summaryMode = false  // Show diffs inline (old behavior)
         case "-S" | "--recapture" => recaptureAll = true  // Force regenerate all snapshots
         case "-s" | "--update" => updateSnapshots = true  // Auto-accept changes
+        case "-a" | "--accept" => autoAcceptDiff = true  // Auto-accept DIFF tests
         case "-c" | "--continue" => continueMode = true  // Continue from last run
         case "--garbage" => garbageMode = true  // List orphan files in books/
         case "--clean" => cleanMode = true  // Remove orphan files and .tmp directories
@@ -127,6 +129,7 @@ object BooktestMain {
       summaryMode = summaryMode,
       recaptureAll = recaptureAll,
       updateSnapshots = updateSnapshots,
+      autoAcceptDiff = autoAcceptDiff,
       continueMode = continueMode,
       threads = threads,
       booktestConfig = booktestConfig
