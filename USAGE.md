@@ -7,7 +7,7 @@ This guide is for using booktest-scala as a testing framework in your Scala proj
 Add to your `build.sbt`:
 
 ```scala
-libraryDependencies += "io.github.arauhala" %% "booktest-scala" % "0.3.0" % Test
+libraryDependencies += "io.github.arauhala" %% "booktest-scala" % "0.4.0" % Test
 ```
 
 Cross-compiled for Scala 2.12, 2.13, and 3.3.
@@ -46,8 +46,11 @@ class MyTests extends TestSuite {
 | `t.key(key, value)` | Labeled key-value pair | Yes |
 | `t.assertln(condition)` | Assert and output OK/FAILED | Yes |
 | `t.assertln(label, cond)` | Assert with label | Yes |
-| `t.fail(msg)` | Mark test as failed | N/A |
-| `t.file(name)` | Get File in output dir | N/A |
+| `t.fail(msg)` | Mark test as failed (no exception) | N/A |
+| `t.f(text)` | Fail content — always marks test failed | Yes |
+| `t.fln(text)` | Fail content with newline | Yes |
+| `t.diff()` | Mark current line as a diff | N/A |
+| `t.file(name)` | Get File in test assets dir | N/A |
 
 Note: `t.tln` and `t.iln` can be called without parentheses to output an empty line.
 
@@ -339,6 +342,195 @@ class ExpensiveTests extends TestSuite {
 }
 ```
 
+### Review Workflow (AI-Assisted Evaluation)
+
+A structured way to collect items that need human (or AI) judgment, batch
+them at the end of a test, and decide pass/fail. Mirrors Python booktest's
+`start_review()` / `reviewln()` / `end_review()` flow.
+
+```scala
+class ModelReviewTests extends TestSuite {
+  def testGptOutput(t: TestCaseRun): Unit = {
+    val response = generateResponse("What is the capital of France?")
+
+    t.h1("GPT Response")
+    t.iln(response)
+
+    t.startReview()
+    // (label, value, passed)
+    //   passed = Some(true)  -> [OK]
+    //   passed = Some(false) -> [FAIL] (and instance is invalidated for retests)
+    //   passed = None        -> [REVIEW] (needs human/AI decision)
+    t.reviewln("Response is accurate", "Yes", Some(true))
+    t.reviewln("Response is concise", s"${response.length} chars", None)
+    // shorthand: condition -> [OK]/[FAIL]
+    t.reviewln("contains 'Paris'", response.contains("Paris"))
+
+    val allPassed = t.endReview()
+    if (!allPassed) t.iln(s"${t.getReviewItems.size} item(s) need attention")
+  }
+}
+```
+
+`startReview()` writes a `## Review Section` header. Each `reviewln`
+writes `[OK]`, `[FAIL]`, or `[REVIEW]` followed by the label and value.
+`endReview()` returns true when nothing needs review.
+
+### Snapshot Navigation (Advanced)
+
+Booktest's snapshot reader maintains a CURSOR over the expected output.
+By default each `t.tln` advances it linearly. For tests where order isn't
+fixed (e.g., dictionary iteration), seek the cursor before writing:
+
+```scala
+def testNonLinearOutput(t: TestCaseRun): Unit = {
+  // Headers automatically seek to a matching line in the snapshot.
+  // Use anchor/seek explicitly when content arrives in non-fixed order.
+
+  t.anchor("Total: ")           // seek to a line starting with "Total: ", then write the prefix
+  t.tln(s"$total")              // continues writing on that anchored line
+
+  t.anchorln("# Summary")       // seek to exact line, write it as tested
+
+  // Manual cursor control:
+  t.seekLine("Section A")       // exact match
+  t.seekPrefix("Item ")         // line-prefix match
+  t.seek(_.contains("FOOBAR"))  // arbitrary predicate
+  t.jump(42)                    // absolute line number
+}
+```
+
+For metric-style tolerance against the previous snapshot value, peek the
+next expected token without consuming it:
+
+```scala
+def testTolerantOutput(t: TestCaseRun): Unit = {
+  t.t("score: ")
+  val previous = t.peekDouble.getOrElse(0.0)  // previous value from snapshot
+  val current  = computeScore()
+  // emit previous if within 5%, else current — keeps snapshot stable
+  val toEmit = if (math.abs(current - previous) / previous < 0.05) previous else current
+  t.tln(toEmit.toString)
+}
+
+// Peek API:
+//   t.peekDouble: Option[Double]
+//   t.peekLong:   Option[Long]
+//   t.peekToken:  Option[String]
+//   t.skipToken(): Unit
+```
+
+`tmetric`, `tLongLn`, `tDoubleLn` use this internally — most tests don't
+need to touch peek directly.
+
+### Live Resources
+
+Share an expensive `AutoCloseable` (database, HTTP server, process) across
+many test consumers. The runner builds it on first use and closes it
+when the last consumer finishes. Pool/capacity allocations are held for
+the resource's lifetime.
+
+```scala
+class StringServer(port: Int, payload: String) extends AutoCloseable {
+  // ... starts/stops an HttpServer on `port` ...
+}
+
+class ServerTests extends TestSuite {
+  // Plain test producing serializable state — same as today.
+  val state: TestRef[String] = test("createState") { (t: TestCaseRun) =>
+    t.tln("State: hello world"); "hello world"
+  }
+
+  // Live resource: depends on `state` (a TestRef) and a port from the
+  // existing PortPool. Built once on first consumer; closed when the
+  // last consumer finishes; port returned to the pool inside close().
+  val server: ResourceRef[StringServer] =
+    liveResource("server", state, resources.ports) {
+      (s: String, port: Int) => new StringServer(port, s)
+    }
+
+  // Consumers depend on the ResourceRef and receive the live object.
+  test("clientGet", server) { (t: TestCaseRun, http: StringServer) =>
+    t.tln(s"GET /echo -> ${http.get("/echo")}")
+  }
+
+  test("clientLength", server) { (t: TestCaseRun, http: StringServer) =>
+    t.tln(s"length: ${http.get("/echo").length}")
+  }
+}
+```
+
+#### Sharing modes
+
+| Declaration | When to use |
+|---|---|
+| `liveResource(name, deps...) { build }` | Default. One instance, many concurrent readers. Tests promise not to mutate observable state. |
+| `liveResourceWithReset(name, deps...) { build } { reset }` | Stateful resource. Runner serializes consumer access (per-instance lock) and calls `reset(handle)` between consumers. Build/close still happen exactly once. |
+| `exclusiveResource(name, deps...) { build }` | Each consumer gets its own fresh instance. Equivalent to today's per-test setup/teardown. |
+
+#### Dependency types
+
+Mix freely in the dep list:
+
+- `TestRef[T]` — a prior test's return value (loaded from `.bin`, or
+  auto-run if missing).
+- `ResourceRef[T]` — another live resource. Refcount-shared; the runner
+  resolves transitively.
+- `ResourcePool[T]` — the existing pool API (e.g. `resources.ports`).
+  The acquired value is **held by the live resource for its lifetime**
+  and returned to the pool inside `close()`.
+- `ResourceCapacity[N].reserve(amount)` — see Capacity below.
+
+#### Capacity (numeric budgets)
+
+For RAM, CPU shares, GPU memory, etc., declare a `capacity` and reserve
+fractions per resource:
+
+```scala
+val ram = capacity("ram", 4096.0)  // 4 GB total
+
+val server: ResourceRef[Server] =
+  liveResource("server", ram.reserve(1024.0)) { (mb: Double) =>
+    new Server(allocatedMb = mb)
+  }
+```
+
+Capacities are **process-global** — multiple suites declaring `capacity("ram", N)`
+share one budget. Override the total at runtime:
+
+- `BOOKTEST_CAPACITY_RAM=8192` env var.
+- `--capacity ram=8192` CLI flag.
+
+The runner pre-validates that no single resource exceeds its capacity
+total (which would deadlock on acquire). Cross-resource sums are not
+validated statically — the runtime acquire path blocks safely if real
+demand exceeds capacity.
+
+#### Failure handling
+
+| Event | Action |
+|---|---|
+| `build` throws | Consumer FAILs with the cause; partial pool/capacity allocations released; sibling tests still run. |
+| `close` throws | Swallowed; allocations released anyway. |
+| `reset` throws | Instance invalidated; next consumer triggers a fresh build. |
+| Consumer fails on `withReset` | Instance always invalidated (state is unknown). |
+| Consumer fails on `SharedReadOnly` | Instance kept by default. Pass `--invalidate-live-on-fail` to force close + rebuild. |
+
+#### Verbose output
+
+`-v` prints lifecycle events and an end-of-run summary:
+
+```
+[build  myTests/server] 110 ms
+clientGet ok 142 ms
+clientLength ok 1 ms
+clientUpper ok 1 ms
+[close  myTests/server] 101 ms
+
+# live resources:
+  myTests/server: builds=1 closes=1 resets=0 alive=140 ms (build 110 ms, close 101 ms)
+```
+
 ## Configuration (`booktest.ini`)
 
 Create a `booktest.ini` in your project root:
@@ -422,12 +614,28 @@ sbt "Test/runMain booktest.BooktestMain --clean"
 | `-pN` | Parallel execution with N threads |
 | `-c, --continue` | Skip tests that passed in previous run |
 | `-S, --recapture` | Force regenerate all snapshots |
-| `-s, --update` | Auto-accept all snapshot changes |
+| `-s, --update` | Auto-accept all snapshot changes (DIFF and FAIL) |
+| `-a, --accept` | Auto-accept DIFF tests only (not FAIL) |
+| `--batch-review` | Sequential interactive review of all failures at end |
 | `--tree` | Hierarchical tree display (with `-l`) |
-| `--inline` | Show diffs inline during execution |
+| `--inline` | Show diffs inline during execution (default: at end) |
+| `--diff-style STYLE` | `unified` (default) / `side-by-side` / `inline` / `minimal` |
+| `--output-dir DIR` | Override output directory (default: `books`) |
+| `--snapshot-dir DIR` | Override snapshot directory (default: `books`) |
+| `--root PREFIX` | Override `root` from `booktest.ini` |
 | `--garbage` | List orphan files in books/ |
 | `--clean` | Remove orphan files and tmp directories |
+| `--invalidate-live-on-fail` | Force-close shared live resources after a consumer failure (default: keep alive) |
+| `--capacity NAME=VALUE` | Override a `capacity(NAME, _)` total at runtime |
 | `--help` | Show help |
+
+### Environment Variables
+
+| Variable | Effect |
+|---|---|
+| `BOOKTEST_PORT_BASE` | Port pool starting port (default: 10000) |
+| `BOOKTEST_PORT_MAX` | Port pool maximum port (default: 60000) |
+| `BOOKTEST_CAPACITY_<NAME>` | Override `capacity(name, _)` total (uppercase suffix) |
 
 ## Snapshot Directory Structure
 
