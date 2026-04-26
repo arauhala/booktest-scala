@@ -17,8 +17,17 @@ object TestMarkers {
 abstract class TestSuite {
   private var _testCases: List[TestCase] = List.empty
   private var _markers: Map[String, Set[String]] = Map.empty  // testName -> markers
+  private var _liveResources: List[LiveResourceDef[?]] = List.empty
 
   lazy val testCases: List[TestCase] = discoverTests()
+
+  /** All live-resource declarations made in this suite. */
+  def liveResources: List[LiveResourceDef[?]] = _liveResources
+
+  /** Access to the runner's ResourceManager for declaring pool deps in
+    * `liveResource(...)`. Forwards to the global default; the runner threads
+    * its own ResourceManager into the same instance via fromEnv(). */
+  protected def resources: ResourceManager = ResourceManager.default
 
   // ============ Setup/Teardown Hooks ============
 
@@ -117,6 +126,159 @@ abstract class TestSuite {
     _testCases = _testCases :+ TestCase(name, wrappedFunction, List(dep1.name, dep2.name, dep3.name), originalFunction = Some(testFunction))
     testRef
   }
+
+  // -- Test consumers of live resources (ResourceRef in dep list) --
+  // Mirror the test(...) shape but accept a ResourceRef for one of the deps.
+  // Type system distinguishes the consumer parameter as the live handle T,
+  // not ResourceRef[T] — runner unwraps at the dep edge.
+
+  def test[T, R1](name: String, res1: ResourceRef[R1])(testFunction: (TestCaseRun, R1) => T): TestRef[T] = {
+    val testRef = TestRef[T](name, List(TestRef[R1](res1.name)))
+    val wrappedFunction: TestCaseRun => Any = { tcr =>
+      testFunction(tcr, null.asInstanceOf[R1])
+    }
+    _testCases = _testCases :+ TestCase(
+      name, wrappedFunction, List(res1.name),
+      originalFunction = Some(testFunction)
+    )
+    testRef
+  }
+
+  def test[T, D1, R1](name: String, dep1: TestRef[D1], res1: ResourceRef[R1])(testFunction: (TestCaseRun, D1, R1) => T): TestRef[T] = {
+    val testRef = TestRef[T](name, List(dep1, TestRef[R1](res1.name)))
+    val wrappedFunction: TestCaseRun => Any = { tcr =>
+      testFunction(tcr, null.asInstanceOf[D1], null.asInstanceOf[R1])
+    }
+    _testCases = _testCases :+ TestCase(
+      name, wrappedFunction, List(dep1.name, res1.name),
+      originalFunction = Some(testFunction)
+    )
+    testRef
+  }
+
+  def test[T, R1, R2](name: String, res1: ResourceRef[R1], res2: ResourceRef[R2])(testFunction: (TestCaseRun, R1, R2) => T): TestRef[T] = {
+    val testRef = TestRef[T](name, List(TestRef[R1](res1.name), TestRef[R2](res2.name)))
+    val wrappedFunction: TestCaseRun => Any = { tcr =>
+      testFunction(tcr, null.asInstanceOf[R1], null.asInstanceOf[R2])
+    }
+    _testCases = _testCases :+ TestCase(
+      name, wrappedFunction, List(res1.name, res2.name),
+      originalFunction = Some(testFunction)
+    )
+    testRef
+  }
+
+  // -- liveResource declarations --
+  // Parallel to test(...): takes a name, dep list, and a build closure.
+  // Build receives resolved dep values in declared order. Returns an
+  // AutoCloseable. Lifecycle managed by the runner.
+
+  /** Internal helper that registers a LiveResourceDef and returns its ref.
+    * Qualifies the resource name with the suite's fully-qualified class name
+    * so resources in different suites don't collide. Throws if a resource
+    * with the same short name was already declared in this suite. */
+  private def registerLiveResource[T](defn: LiveResourceDef[T]): ResourceRef[T] = {
+    val qName = s"${this.fullClassName}/${defn.name}"
+    if (_liveResources.exists(_.name == qName)) {
+      throw new IllegalArgumentException(
+        s"Duplicate live resource name '${defn.name}' in suite ${this.fullClassName}")
+    }
+    val qDef = defn.copy(name = qName)
+    _liveResources = _liveResources :+ qDef
+    qDef.ref
+  }
+
+  // ---- Default: SharedReadOnly ----
+
+  def liveResource[T <: AutoCloseable]
+      (name: String)
+      (build: => T): ResourceRef[T] =
+    registerLiveResource(LiveResourceDef[T](
+      name, List.empty, _ => build))
+
+  def liveResource[T <: AutoCloseable, D1]
+      (name: String, dep1: Dep[D1])
+      (build: D1 => T): ResourceRef[T] =
+    registerLiveResource(LiveResourceDef[T](
+      name, List(dep1),
+      vs => build(vs(0).asInstanceOf[D1])))
+
+  def liveResource[T <: AutoCloseable, D1, D2]
+      (name: String, dep1: Dep[D1], dep2: Dep[D2])
+      (build: (D1, D2) => T): ResourceRef[T] =
+    registerLiveResource(LiveResourceDef[T](
+      name, List(dep1, dep2),
+      vs => build(vs(0).asInstanceOf[D1], vs(1).asInstanceOf[D2])))
+
+  def liveResource[T <: AutoCloseable, D1, D2, D3]
+      (name: String, dep1: Dep[D1], dep2: Dep[D2], dep3: Dep[D3])
+      (build: (D1, D2, D3) => T): ResourceRef[T] =
+    registerLiveResource(LiveResourceDef[T](
+      name, List(dep1, dep2, dep3),
+      vs => build(vs(0).asInstanceOf[D1], vs(1).asInstanceOf[D2], vs(2).asInstanceOf[D3])))
+
+  // ---- Exclusive: each consumer gets its own instance ----
+
+  def exclusiveResource[T <: AutoCloseable]
+      (name: String)
+      (build: => T): ResourceRef[T] =
+    registerLiveResource(LiveResourceDef[T](
+      name, List.empty, _ => build, ShareMode.Exclusive))
+
+  def exclusiveResource[T <: AutoCloseable, D1]
+      (name: String, dep1: Dep[D1])
+      (build: D1 => T): ResourceRef[T] =
+    registerLiveResource(LiveResourceDef[T](
+      name, List(dep1),
+      vs => build(vs(0).asInstanceOf[D1]),
+      ShareMode.Exclusive))
+
+  def exclusiveResource[T <: AutoCloseable, D1, D2]
+      (name: String, dep1: Dep[D1], dep2: Dep[D2])
+      (build: (D1, D2) => T): ResourceRef[T] =
+    registerLiveResource(LiveResourceDef[T](
+      name, List(dep1, dep2),
+      vs => build(vs(0).asInstanceOf[D1], vs(1).asInstanceOf[D2]),
+      ShareMode.Exclusive))
+
+  // ---- SharedWithReset: shared instance, reset between consumers ----
+
+  def liveResourceWithReset[T <: AutoCloseable]
+      (name: String)
+      (build: => T)
+      (reset: T => Unit): ResourceRef[T] =
+    registerLiveResource(LiveResourceDef[T](
+      name, List.empty, _ => build, ShareMode.SharedWithReset(reset)))
+
+  def liveResourceWithReset[T <: AutoCloseable, D1]
+      (name: String, dep1: Dep[D1])
+      (build: D1 => T)
+      (reset: T => Unit): ResourceRef[T] =
+    registerLiveResource(LiveResourceDef[T](
+      name, List(dep1),
+      vs => build(vs(0).asInstanceOf[D1]),
+      ShareMode.SharedWithReset(reset)))
+
+  def liveResourceWithReset[T <: AutoCloseable, D1, D2]
+      (name: String, dep1: Dep[D1], dep2: Dep[D2])
+      (build: (D1, D2) => T)
+      (reset: T => Unit): ResourceRef[T] =
+    registerLiveResource(LiveResourceDef[T](
+      name, List(dep1, dep2),
+      vs => build(vs(0).asInstanceOf[D1], vs(1).asInstanceOf[D2]),
+      ShareMode.SharedWithReset(reset)))
+
+  // ---- Capacity declaration ----
+
+  /** Declare a numeric capacity (e.g. 4096 MB of RAM). The returned value
+    * can produce dep entries via `cap.reserve(amount)`.
+    *
+    * Capacities are scoped *globally* (via the runner's ResourceManager) so
+    * suites sharing a name like "ram" share one budget. The `total` here is
+    * a default; override at runtime via `--capacity name=value` or the env
+    * var `BOOKTEST_CAPACITY_<NAME>`. */
+  protected def capacity(name: String, total: Double): ResourceCapacity[Double] =
+    resources.capacity(name, total)
   
   private def discoverTests(): List[TestCase] = {
     val clazz = this.getClass

@@ -23,7 +23,8 @@ case class RunConfig(
   continueMode: Boolean = false,  // -c: continue from last run, skip successful tests
   threads: Int = 1,  // -p N: number of threads for parallel execution
   output: java.io.PrintStream = System.out,  // Output stream (redirect for meta tests)
-  booktestConfig: BooktestConfig = BooktestConfig.empty  // test-root and groups config
+  booktestConfig: BooktestConfig = BooktestConfig.empty,  // test-root and groups config
+  invalidateLiveOnFail: Boolean = false  // --invalidate-live-on-fail
 ) {
   /** Get the test path for a suite, applying test-root stripping */
   def getSuitePath(suiteName: String): String = {
@@ -75,6 +76,20 @@ case class RunResult(
 class TestRunner(config: RunConfig = RunConfig()) {
   private val dependencyCache = new DependencyCache()
   private val resourceManager = ResourceManager.fromEnv()
+  private val liveResources = {
+    val mgr = new LiveResourceManager(resourceManager)
+    if (config.verbose) {
+      mgr.listener = new LiveResourceListener {
+        override def onBuild(name: String, durationMs: Long): Unit =
+          config.output.println(s"  [build $name] ${durationMs} ms")
+        override def onClose(name: String, durationMs: Long): Unit =
+          config.output.println(s"  [close $name] ${durationMs} ms")
+        override def onReset(name: String, durationMs: Long): Unit =
+          config.output.println(s"  [reset $name] ${durationMs} ms")
+      }
+    }
+    mgr
+  }
   @volatile private var interactiveQuit = false
   private val out = config.output
 
@@ -136,6 +151,10 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val logCapture = new LogCapture(testRun.logFile)
     logCapture.start()
 
+    // Tracks whether the test failed for live-resource invalidation in
+    // the finally block.
+    var consumerFailed = false
+
     try {
       // Call setup hook
       if (suite != null) {
@@ -164,6 +183,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       // Check if test explicitly failed via t.fail()
       val result = if (testRun.isFailed) {
         val failMsg = testRun.failMessage.map(m => s": $m").getOrElse("")
+        consumerFailed = true
         snapshotResult.copy(
           testName = fullTestName,
           passed = false,
@@ -265,6 +285,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
     } catch {
       case e: Exception =>
+        consumerFailed = true
         // Write exception to output like Python: t.iln(traceback.format_exc())
         testRun.iln()
         testRun.fail()
@@ -312,6 +333,17 @@ class TestRunner(config: RunConfig = RunConfig()) {
     } finally {
       // Release resource locks
       locks.foreach(lock => resourceManager.locks.release(lock))
+      // Release every transitively-reserved live resource for this
+      // consumer (in dep order — nested last). Direct dep gets the
+      // failure flag so SharedWithReset / invalidate-on-fail trigger;
+      // transitive nested deps don't need that signal.
+      val reach = liveResources.transitiveResourceClosure(testCase.dependencies)
+      val direct = testCase.dependencies.toSet
+      reach.foreach { name =>
+        liveResources.release(name, testCase.name,
+          failed = consumerFailed && direct.contains(name),
+          invalidateOnFail = config.invalidateLiveOnFail)
+      }
     }
   }
 
@@ -322,6 +354,10 @@ class TestRunner(config: RunConfig = RunConfig()) {
     out.println()
     out.println("# test results:")
     out.println()
+
+    // Register live-resource declarations from every suite so dep resolution
+    // can detect "this dep name is a live resource, not a test cache".
+    suites.foreach(_.liveResources.foreach(liveResources.register))
 
     // Load previous case reports for continue mode
     val outDir = config.outputDir / ".out"
@@ -359,13 +395,66 @@ class TestRunner(config: RunConfig = RunConfig()) {
       List.empty
     }
 
-    // Run suites (filtering out tests that were skipped in continue mode)
-    val allResults = if (config.threads > 1) {
-      runSuitesParallel(suites, todoSet)
-    } else {
-      suites.takeWhile(_ => !interactiveQuit).map { suite =>
-        runSuiteWithFilter(suite, todoSet)
+    // Pre-pass: pre-reserve refcount for each (test, direct-resource-dep)
+    // edge so a shared resource doesn't close between tests that need it.
+    // Also collect the set of reachable live resources for capacity
+    // validation and the locality scheduler.
+    val reachableLiveResources = scala.collection.mutable.Set[String]()
+    suites.foreach { suite =>
+      val suitePath = config.getSuitePath(suite.fullClassName)
+      val testCases = suite.testCases
+      val filtered = config.testFilter match {
+        case Some(pattern) => testCases.filter(_.name.contains(pattern))
+        case None => testCases
       }
+      val selected = if (config.continueMode)
+        filtered.filter(tc => todoSet.contains(s"$suitePath/${tc.name}"))
+      else filtered
+      selected.foreach { tc =>
+        // Reserve transitively: every live resource reachable from this
+        // test's direct deps gets +1 on its refcount, so nested
+        // resources stay alive across all transitive consumers.
+        val reach = liveResources.transitiveResourceClosure(tc.dependencies)
+        reach.foreach { name =>
+          liveResources.reserve(name, tc.name)
+          reachableLiveResources += name
+        }
+      }
+    }
+    // Pre-pass: capacity validation. Reject only the case that's
+    // statically guaranteed to deadlock — a single resource reserves more
+    // than the capacity total. Cross-resource sums depend on actual
+    // concurrency (test ordering, -pN), and the runtime acquire path
+    // already blocks safely if real demand exceeds capacity.
+    reachableLiveResources.foreach { name =>
+      liveResources.lookup(name).foreach { defn =>
+        defn.deps.foreach {
+          case CapacityDep(cap, amount) =>
+            val capName = cap match { case d: DoubleCapacity => d.name; case _ => "?" }
+            val amt = amount match { case d: Double => d; case _ => 0.0 }
+            val avail = cap.capacity match { case d: Double => d; case _ => Double.PositiveInfinity }
+            if (amt > avail) {
+              throw new IllegalStateException(
+                s"Capacity '$capName' over-committed: '$name' reserves $amt > capacity $avail. " +
+                s"Override with --capacity $capName=<larger> or BOOKTEST_CAPACITY_${capName.toUpperCase}.")
+            }
+          case _ => ()
+        }
+      }
+    }
+
+    // Run suites (filtering out tests that were skipped in continue mode)
+    val allResults = try {
+      if (config.threads > 1) {
+        runSuitesParallel(suites, todoSet)
+      } else {
+        suites.takeWhile(_ => !interactiveQuit).map { suite =>
+          runSuiteWithFilter(suite, todoSet)
+        }
+      }
+    } finally {
+      // Force teardown of any still-alive live resources at end of run.
+      liveResources.shutdownAll()
     }
 
     val endTime = System.currentTimeMillis()
@@ -415,6 +504,9 @@ class TestRunner(config: RunConfig = RunConfig()) {
       printCollectedDiffs(finalResults)
     }
 
+    // End-of-run live-resource summary (verbose only).
+    if (config.verbose) printLiveResourceSummary()
+
     RunResult(
       totalTests = totalTests,
       passedTests = finalPassedCount,
@@ -422,6 +514,19 @@ class TestRunner(config: RunConfig = RunConfig()) {
       results = finalResults,
       totalDurationMs = totalDuration
     )
+  }
+
+  private def printLiveResourceSummary(): Unit = {
+    val stats = liveResources.statsSnapshot.filter(_.builds > 0)
+    if (stats.isEmpty) return
+    out.println()
+    out.println("# live resources:")
+    out.println()
+    stats.sortBy(_.name).foreach { s =>
+      out.println(s"  ${s.name}: builds=${s.builds} closes=${s.closes} " +
+        s"resets=${s.resets} alive=${s.totalAliveMs} ms " +
+        s"(build ${s.totalBuildMs} ms, close ${s.totalCloseMs} ms)")
+    }
   }
   
   private def printCollectedDiffs(results: List[TestResult]): Unit = {
@@ -532,7 +637,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       if (config.threads > 1) {
         runTestsParallel(testsToRun, fullClassName, suite)
       } else {
-        val sortedTests = resolveDependencyOrder(testsToRun)
+        val sortedTests = applyLocalityGrouping(resolveDependencyOrder(testsToRun))
         sortedTests.takeWhile(_ => !interactiveQuit).map(runTestCase(_, fullClassName, suite))
       }
     } finally {
@@ -713,6 +818,53 @@ class TestRunner(config: RunConfig = RunConfig()) {
     else 0
   }
   
+  /** Sequential-mode locality: after topological sort, group consecutive
+    * tests sharing a live-resource dep so a resource can stay alive across
+    * its consumers. Stable for tests with no live deps. */
+  private def applyLocalityGrouping(tests: List[TestCase]): List[TestCase] = {
+    if (!tests.exists(tc => tc.dependencies.exists(liveResources.isRegistered))) {
+      return tests
+    }
+    // Walk tests; whenever a test has live-resource deps, look ahead and
+    // pull other consumers of the SAME resource forward to be adjacent.
+    val remaining = scala.collection.mutable.ListBuffer[TestCase]()
+    remaining ++= tests
+    val out = scala.collection.mutable.ListBuffer[TestCase]()
+    while (remaining.nonEmpty) {
+      val tc = remaining.remove(0)
+      out += tc
+      val liveDeps = tc.dependencies.filter(liveResources.isRegistered).toSet
+      if (liveDeps.nonEmpty) {
+        val (similar, others) = remaining.toList.partition { other =>
+          other.dependencies.exists(liveDeps.contains)
+        }
+        remaining.clear()
+        remaining ++= similar
+        remaining ++= others
+      }
+    }
+    out.toList
+  }
+
+  /** Parallel-mode locality: rank ready tests so the scheduler submits the
+    * "best" candidate first. Higher score = should run sooner. */
+  private def localityScore(tc: TestCase): Int = {
+    val liveDeps = tc.dependencies.filter(liveResources.isRegistered)
+    if (liveDeps.isEmpty) 0
+    else {
+      val allAlive = liveDeps.forall(liveResources.isAlive)
+      val isLastConsumer = liveDeps.exists { dep =>
+        liveResources.isAlive(dep) && liveResources.pendingConsumerCount(dep) == 1
+      }
+      // 4 = alive + last consumer (drains a resource). Best.
+      // 3 = alive (locality). Good.
+      // 1 = needs to start a fresh resource. Worse than running an alive one.
+      if (isLastConsumer) 4
+      else if (allAlive) 3
+      else 1
+    }
+  }
+
   private def resolveDependencyOrder(testCases: List[TestCase]): List[TestCase] = {
     val testMap = testCases.map(tc => tc.name -> tc).toMap
     val visited = scala.collection.mutable.Set[String]()
@@ -726,7 +878,10 @@ class TestRunner(config: RunConfig = RunConfig()) {
             testCase.dependencies.foreach(visit)
             result += testCase
           case None =>
-            throw new IllegalArgumentException(s"Dependency '$testName' not found")
+            // A dep not in the test map is a live resource — materialized
+            // on demand by LiveResourceManager, no ordering constraint.
+            if (!liveResources.isRegistered(testName))
+              throw new IllegalArgumentException(s"Dependency '$testName' not found")
         }
       }
     }
@@ -765,12 +920,29 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val schedulerThread = new Thread(() => {
       try {
         while (completed.size < testCases.size && schedulerError.isEmpty) {
-          // Find tests that are ready to run
+          // Find tests that are ready to run, then locality-rank them so
+          // the scheduler favors tests against already-alive resources
+          // (and tests that drain a resource).
+          //
+          // If the suite declares resourceLocks, force sequential order
+          // within it: don't submit a new test while any sibling is still
+          // in progress. Otherwise siblings race at the lock and the
+          // observed order becomes non-deterministic.
+          val suiteHasLocks =
+            suite != null && suite.getResourceLocks.nonEmpty
           val ready = schedulerLock.synchronized {
-            testCases.filter { tc =>
-              !completed.contains(tc.name) &&
-              !inProgress.contains(tc.name) &&
-              tc.dependencies.forall(dep => completed.contains(dep) || !testMap.contains(dep))
+            if (suiteHasLocks && inProgress.nonEmpty) Nil
+            else {
+              val readyUnranked = testCases.filter { tc =>
+                !completed.contains(tc.name) &&
+                !inProgress.contains(tc.name) &&
+                tc.dependencies.forall(dep => completed.contains(dep) || !testMap.contains(dep))
+              }
+              val ranked = readyUnranked.zipWithIndex
+                .sortBy { case (tc, idx) => (-localityScore(tc), idx) }
+                .map(_._1)
+              // When locked, only submit one at a time so order = test list order.
+              if (suiteHasLocks) ranked.take(1) else ranked
             }
           }
 
@@ -941,6 +1113,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val logCapture = new LogCapture(testRun.logFile)
     logCapture.start()
 
+    var consumerFailed = false
+
     try {
       // Setup
       if (suite != null) {
@@ -965,6 +1139,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
       val result = if (testRun.isFailed) {
         val failMsg = testRun.failMessage.map(m => s": $m").getOrElse("")
+        consumerFailed = true
         snapshotResult.copy(
           testName = fullTestName,
           passed = false,
@@ -999,6 +1174,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
     } catch {
       case e: Exception =>
+        consumerFailed = true
         testRun.end()
         logCapture.stop()
         val endTime = System.currentTimeMillis()
@@ -1015,6 +1191,17 @@ class TestRunner(config: RunConfig = RunConfig()) {
     } finally {
       // Release resource locks
       locks.foreach(lock => resourceManager.locks.release(lock))
+      // Release every transitively-reserved live resource for this
+      // consumer (in dep order — nested last). Direct dep gets the
+      // failure flag so SharedWithReset / invalidate-on-fail trigger;
+      // transitive nested deps don't need that signal.
+      val reach = liveResources.transitiveResourceClosure(testCase.dependencies)
+      val direct = testCase.dependencies.toSet
+      reach.foreach { name =>
+        liveResources.release(name, testCase.name,
+          failed = consumerFailed && direct.contains(name),
+          invalidateOnFail = config.invalidateLiveOnFail)
+      }
     }
   }
 
@@ -1107,6 +1294,42 @@ class TestRunner(config: RunConfig = RunConfig()) {
     }
   }
 
+  /** Resolve a dep that belongs to a *live resource's* dep list (used as a
+    * callback by LiveResourceManager.acquire). The consumerTestName is the
+    * outermost consumer that triggered the resolution chain — needed so a
+    * nested resource that's Exclusive can give that consumer its own
+    * instance. */
+  private def resolveLiveDep(
+    dep: Dep[?], suitePath: String, testRun: TestCaseRun,
+    suiteName: String, suite: TestSuite, consumerTestName: String
+  ): Any = dep match {
+    case TestDep(ref) =>
+      resolveDependencyValue(ref.name, suitePath, testRun, suiteName, suite)
+    case ResourceDep(ref) =>
+      liveResources.acquire[Any](ref.name, consumerTestName,
+        d => resolveLiveDep(d, suitePath, testRun, suiteName, suite, consumerTestName))
+    case PoolDep(pool) =>
+      pool.acquire()
+    case CapacityDep(cap, amount) =>
+      cap.asInstanceOf[ResourceCapacity[Any]].acquire(amount.asInstanceOf[Any])
+      amount
+  }
+
+  /** Resolve a single dep name for a *consumer test*. Routes to
+    * LiveResourceManager if the name matches a registered live resource,
+    * otherwise falls back to the existing test-cache path. */
+  private def resolveConsumerDep(
+    depName: String, suitePath: String, testRun: TestCaseRun,
+    suiteName: String, suite: TestSuite, consumerTestName: String
+  ): Any = {
+    if (liveResources.isRegistered(depName)) {
+      liveResources.acquire[Any](depName, consumerTestName,
+        d => resolveLiveDep(d, suitePath, testRun, suiteName, suite, consumerTestName))
+    } else {
+      resolveDependencyValue(depName, suitePath, testRun, suiteName, suite)
+    }
+  }
+
   private def executeTestWithDependencies(testCase: TestCase, testRun: TestCaseRun, suitePath: String = "", suite: TestSuite = null): Any = {
     val suiteName = if (suite != null) suite.fullClassName else ""
 
@@ -1122,7 +1345,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
             out.println(s"    Looking for dependencies: ${testCase.dependencies}")
           }
           val dependencyValues = testCase.dependencies.map { depName =>
-            resolveDependencyValue(depName, suitePath, testRun, suiteName, suite)
+            resolveConsumerDep(depName, suitePath, testRun, suiteName, suite, testCase.name)
           }
 
           // Call the function with proper arguments based on number of dependencies
@@ -1154,7 +1377,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
                 out.println(s"    Looking for dependencies: ${testCase.dependencies}")
               }
               val dependencyValues = testCase.dependencies.map { depName =>
-                resolveDependencyValue(depName, suitePath, testRun, suiteName, suite)
+                resolveConsumerDep(depName, suitePath, testRun, suiteName, suite, testCase.name)
               }
 
               // Create arguments array: TestCaseRun + dependency values

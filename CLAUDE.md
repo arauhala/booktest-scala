@@ -251,6 +251,180 @@ books/
 - **Review Mode**: Show diffs without re-running tests
 - **Markdown Format**: Human-readable test output format
 
+## Live Resources
+
+Some tests need a stateful external service (database, HTTP server, process)
+that is expensive to start. Booktest's **live resources** let many tests
+share one running instance.
+
+A live resource is declared with `liveResource(...)` next to `test(...)`. It
+is **not** a test: no snapshot, no `.bin` cache, no `TestCaseRun`. It just
+returns an `AutoCloseable` and the runner manages its lifecycle.
+
+```scala
+class StringServer(port: Int, payload: String) extends AutoCloseable {
+  // ... starts an HttpServer on `port` in init, stops it in close() ...
+}
+
+class MyTests extends TestSuite {
+
+  // A normal test: serializable state, snapshotted as today.
+  val state: TestRef[String] = test("createState") { (t: TestCaseRun) =>
+    t.tln("State: hello world")
+    "hello world"
+  }
+
+  // A live resource: depends on `state` (a TestRef) and a port from the
+  // existing PortPool. Built once on first consumer, closed when the last
+  // consumer finishes. The port is held for the resource's lifetime and
+  // released back to the pool when close() is called.
+  val server: ResourceRef[StringServer] =
+    liveResource("server", state, resources.ports) {
+      (s: String, port: Int) => new StringServer(port, s)
+    }
+
+  // Consumers depend on the ResourceRef and receive the live object.
+  test("clientGet", server) { (t: TestCaseRun, http: StringServer) =>
+    t.tln(s"GET /echo -> ${http.get("/echo")}")
+  }
+
+  test("clientLength", server) { (t: TestCaseRun, http: StringServer) =>
+    t.tln(s"length: ${http.get("/echo").length}")
+  }
+}
+```
+
+### Choosing a sharing mode
+
+| Declaration | When to use |
+|---|---|
+| `liveResource(name, deps...) { build }` | Default. Multiple consumers use the **same** instance concurrently. Tests promise not to mutate observable state. |
+| `liveResource.withReset` (`liveResourceWithReset(name, deps...) { build } { reset }`) | Tests mutate state but the reset closure brings it back to a known baseline. The runner serializes consumer access on this instance and calls `reset(handle)` between consumers. Build/close still happen exactly once. |
+| `exclusiveResource(name, deps...) { build }` | Each consumer gets its **own** fresh instance. Use when sharing isn't safe at all. Equivalent to today's per-test setup/teardown. |
+
+### Dependency types
+
+A `liveResource(...)` dep list mixes three kinds, all type-distinguished:
+
+- `TestRef[T]` — a previous test's return value, loaded from `.bin` (or
+  auto-run if missing).
+- `ResourceRef[T]` — another live resource. The runner resolves
+  transitively and shares its instance via refcount.
+- `ResourcePool[T]` — the existing pool API (e.g. `resources.ports`,
+  custom pools). Allocation is **held by the live resource** for its
+  lifetime and released inside `close()`.
+- `ResourceCapacity[N].reserve(amount)` — see Capacity below.
+
+### Capacity (numeric budgets)
+
+For RAM, CPU shares, GPU memory, etc., declare a `capacity` and reserve a
+fraction of it per resource:
+
+```scala
+val ram = capacity("ram", 4096.0)  // 4 GB total, default
+
+val server: ResourceRef[Server] =
+  liveResource("server", ram.reserve(1024.0)) { (mb: Double) =>
+    new Server(allocatedMb = mb)
+  }
+```
+
+Capacities are **process-global** — multiple suites declaring `capacity("ram", N)`
+share one budget. Override the total at runtime:
+
+- `BOOKTEST_CAPACITY_RAM=8192` env var.
+- `--capacity ram=8192` CLI flag.
+
+The runner pre-validates that the **max concurrent demand** (sum across
+reachable live resources) doesn't exceed the capacity total — if it would,
+the run fails fast with the offending reservations listed.
+
+### Failure handling
+
+- **build throws** → consumer fails clearly with the cause; pool/capacity
+  allocations released; sibling tests still run.
+- **close throws** → swallowed; allocations released anyway.
+- **reset throws** → instance invalidated; next consumer triggers a fresh
+  build.
+- **consumer fails on `withReset`** → instance always invalidated (state is
+  unknown).
+- **consumer fails on `SharedReadOnly`** → instance kept by default. Pass
+  `--invalidate-live-on-fail` to force close + rebuild after any failure.
+
+### Verbose output
+
+`-v` prints lifecycle events and an end-of-run summary:
+
+```
+[build  myTests/server] 110 ms
+clientGet ok 142 ms
+clientLength ok 1 ms
+clientUpper ok 1 ms
+[close  myTests/server] 101 ms
+
+# live resources:
+  myTests/server: builds=1 closes=1 resets=0 alive=140 ms (build 110 ms, close 101 ms)
+```
+
+See `.ai/plan/live-resources.md` and `.ai/plan/live-resources-example.md`
+for the full design and a worked example.
+
+## Test-Driven Development
+
+Booktest is itself a test framework, so framework changes are best driven by
+writing booktest snapshot tests first. The workflow:
+
+1. **Write the test you wish you could write.** Add an example to
+   `src/test/scala/booktest/examples/` that uses the desired API. For
+   framework-internal behavior (cache shape, scheduling, error paths), add a
+   focused test under `src/test/scala/booktest/test/`.
+2. **Run it and watch it fail.** A new test fails because either:
+   - Compilation fails (the API doesn't exist yet) — implement the minimum
+     surface to compile.
+   - The snapshot is missing — run with `-v` to see the actual output.
+   - The snapshot exists and shows the wrong content (DIFF) — read the
+     diff, decide whether to fix the code or accept the new snapshot.
+3. **Implement the smallest change** that makes the test pass.
+4. **Re-run.** Use `-v` to see the full output during development. When
+   the diff looks right, accept the snapshot — pick the flag that matches
+   intent:
+   - `-i` (interactive): step through diffs, accept/reject each.
+   - `-a` (auto-accept DIFFs but not FAILs): bulk-accept after a careful
+     read.
+   - `-s` (update all snapshots): only when you've already reviewed the
+     content; commits whatever the test produces.
+5. **Add edge cases** as additional tests, repeat. Each new behavior gets its
+   own test file or its own test method, not a branch in an existing test.
+6. **Commit the test and snapshot together.** The `.md` snapshot is the
+   spec; reviewers look at it in the PR diff.
+
+Useful loops while iterating:
+
+```bash
+# Fast inner loop on one test
+sbt "Test/runMain booktest.BooktestMain -v -t myNewTest booktest.examples.MyTests"
+
+# Accept a snapshot interactively after inspecting the diff
+sbt "Test/runMain booktest.BooktestMain -i booktest.examples.MyTests"
+
+# Re-show last run's diffs without re-executing tests (cheap)
+sbt "Test/runMain booktest.BooktestMain -w booktest.examples.MyTests"
+```
+
+Conventions:
+
+- **Tests describe behavior, not implementation.** Snapshot the externally
+  visible output, not internal counters.
+- **One concept per test.** Multi-step scenarios are fine, but each test
+  should answer one question.
+- **No assertions hidden in helpers.** Use `t.tln(...)` directly so the
+  snapshot tells the whole story.
+- **Don't edit snapshots by hand.** Re-run with `-i` or `-a`. A snapshot
+  that diverged from what the code produces is a lie.
+- **For dependency / cache / scheduler work**, prefer tests where the
+  observable trace (setup count, execution order, cached value) is part of
+  the snapshot. That's how we catch regressions in the runner itself.
+
 ## Related Projects
 
 - [booktest (Python)](https://github.com/lumoa-oss/booktest) - The original Python implementation

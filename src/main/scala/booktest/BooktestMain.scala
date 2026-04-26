@@ -28,6 +28,8 @@ object BooktestMain {
     var garbageMode = false  // --garbage: list orphan files
     var cleanMode = false  // --clean: remove orphan files and temp directories
     var rootOverride: Option[String] = None  // --root: package prefix to strip from paths
+    var invalidateLiveOnFail = false  // --invalidate-live-on-fail
+    var capacityOverrides = Map.empty[String, Double]  // --capacity name=value
     val testClasses = scala.collection.mutable.ListBuffer[String]()
     
     var i = 0
@@ -47,6 +49,19 @@ object BooktestMain {
         case "-c" | "--continue" => continueMode = true  // Continue from last run
         case "--garbage" => garbageMode = true  // List orphan files in books/
         case "--clean" => cleanMode = true  // Remove orphan files and .tmp directories
+        case "--invalidate-live-on-fail" => invalidateLiveOnFail = true
+        case "--capacity" =>
+          i += 1
+          if (i < args.length) {
+            args(i).split("=", 2) match {
+              case Array(name, value) =>
+                try capacityOverrides = capacityOverrides + (name -> value.toDouble)
+                catch { case _: NumberFormatException =>
+                  println(s"Invalid --capacity value: ${args(i)}")
+                }
+              case _ => println(s"Invalid --capacity format (expected name=value): ${args(i)}")
+            }
+          }
         case "-p" =>
           i += 1
           if (i < args.length) {
@@ -132,8 +147,15 @@ object BooktestMain {
       autoAcceptDiff = autoAcceptDiff,
       continueMode = continueMode,
       threads = threads,
-      booktestConfig = booktestConfig
+      booktestConfig = booktestConfig,
+      invalidateLiveOnFail = invalidateLiveOnFail
     )
+
+    // Apply capacity overrides from CLI to the global ResourceManager.
+    // capacity(name, default) reads this map.
+    capacityOverrides.foreach { case (name, value) =>
+      ResourceManager.default.setCapacityOverride(name, value)
+    }
 
     // Resolve test suites - paths are relative to root namespace
     val suites: List[TestSuite] = if (testClasses.isEmpty) {

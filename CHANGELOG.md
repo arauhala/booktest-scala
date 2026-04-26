@@ -1,5 +1,94 @@
 # Changelog
 
+## 0.4.0 (2026-04-26)
+
+### Live resources
+
+A new `liveResource(name, deps...) { build }` declaration on `TestSuite`
+shares an expensive-to-build `AutoCloseable` (database, HTTP server,
+process) across many test consumers. Three sharing modes:
+
+- `liveResource(...)` — default. One instance, many concurrent readers.
+- `liveResource.withReset` (`liveResourceWithReset(...) { build } { reset }`)
+  — shared instance, runner serializes consumer access and calls `reset`
+  between consumers. Build/close happen once.
+- `exclusiveResource(...)` — each consumer gets its own instance.
+
+Consumers receive the live object directly:
+
+```scala
+val server: ResourceRef[StringServer] =
+  liveResource("server", state, resources.ports) {
+    (s: String, port: Int) => new StringServer(port, s)
+  }
+
+test("clientGet", server) { (t: TestCaseRun, http: StringServer) =>
+  t.tln(s"GET /echo -> ${http.get("/echo")}")
+}
+```
+
+Dependencies in a `liveResource` declaration mix freely:
+- `TestRef[T]` — a previous test's return value (loaded from `.bin`).
+- `ResourceRef[T]` — another live resource (refcount-shared).
+- `ResourcePool[T]` (e.g. `resources.ports`) — held for the resource's
+  lifetime, released into the pool on close.
+- `ResourceCapacity[N].reserve(amount)` — see Capacity.
+
+### Capacity (numeric budgets)
+
+`ResourceCapacity` allocates fractions of a numeric total (e.g. RAM in MB,
+CPU shares). Declared per suite, but global per name:
+
+```scala
+val ram = capacity("ram", 4096.0)  // 4 GB total
+
+val server: ResourceRef[Server] =
+  liveResource("server", ram.reserve(1024.0)) { (mb: Double) => ... }
+```
+
+Override at runtime:
+- `BOOKTEST_CAPACITY_<NAME>=8192` env var.
+- `--capacity ram=8192` CLI flag.
+
+### Lifecycle, scheduling, and failure handling
+
+- **Refcount-based teardown**. The runner pre-reserves the transitive
+  closure of each test's live-resource deps so nested resources stay
+  alive across all consumers, then releases each (leaf-last) when the
+  test ends.
+- **Locality-aware scheduler**. Sequential mode groups consumers of the
+  same resource adjacent. Parallel mode ranks ready tests so already-alive
+  resources are drained first. Suites with `resourceLocks` are serialized
+  inside the parallel scheduler for deterministic order.
+- **Capacity validation pre-pass**: any single resource's reservation
+  exceeding its capacity total fails fast with a clear message.
+- **Lifecycle telemetry**: `-v` prints `[build name] ms`, `[close name] ms`,
+  `[reset name] ms`, plus an end-of-run "live resources" summary table
+  (builds/closes/resets/alive ms per resource).
+- **Failure semantics**:
+  - `build` throws → consumer fails clearly with the cause; sibling tests
+    still run; partially-acquired pool/capacity allocations are released.
+  - `close` throws → swallowed; allocations released anyway.
+  - `reset` throws → instance invalidated; next consumer triggers a fresh
+    build.
+  - Consumer fails on `withReset` → instance always invalidated.
+  - Consumer fails on `SharedReadOnly` → instance kept by default. Pass
+    `--invalidate-live-on-fail` to force close + rebuild after any
+    failure.
+- **Concurrency safety**: per-entry build lock prevents concurrent
+  first-time consumers in parallel mode from each materializing their
+  own instance.
+
+### Documentation
+
+- New `## Live Resources` section in CLAUDE.md with API reference, sharing
+  mode table, dependency types, capacity, failure semantics, and verbose
+  output sample.
+- `## Test-Driven Development` section codifies the snapshot-test
+  workflow used to develop the framework.
+- Design docs in `.ai/plan/live-resources.md` (full design) and
+  `.ai/plan/live-resources-example.md` (worked example).
+
 ## 0.3.7 (2026-04-23)
 
 ### Unified interactive review

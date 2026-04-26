@@ -12,6 +12,8 @@ import scala.util.Try
 class ResourceManager(portPool: PortPool = new PortPool()) {
   private val lockPool = new LockPool()
   private val resources = mutable.Map[String, ResourcePool[Any]]()
+  private val capacities = mutable.Map[String, ResourceCapacity[Any]]()
+  private val capacityOverrides = mutable.Map[String, Double]()
 
   /** Get the port pool for allocating network ports */
   def ports: PortPool = portPool
@@ -29,6 +31,34 @@ class ResourceManager(portPool: PortPool = new PortPool()) {
     resources.get(name).map(_.asInstanceOf[ResourcePool[T]])
   }
 
+  /** Override a capacity total. Applied at construction time when
+    * `capacity(name, default)` is called for the first time. Can also be
+    * provided via `BOOKTEST_CAPACITY_<NAME>` env var. */
+  def setCapacityOverride(name: String, total: Double): Unit = synchronized {
+    capacityOverrides(name) = total
+  }
+
+  /** Get-or-create a Double capacity. Subsequent calls with the same name
+    * return the same instance (so all suites share one budget). */
+  def capacity(name: String, default: Double): ResourceCapacity[Double] = synchronized {
+    capacities.get(name) match {
+      case Some(c) => c.asInstanceOf[ResourceCapacity[Double]]
+      case None =>
+        val total = capacityOverrides.getOrElse(name,
+          sys.env.get(s"BOOKTEST_CAPACITY_${name.toUpperCase}")
+            .flatMap(s => scala.util.Try(s.toDouble).toOption)
+            .getOrElse(default))
+        val cap = new DoubleCapacity(name, total)
+        capacities(name) = cap.asInstanceOf[ResourceCapacity[Any]]
+        cap
+    }
+  }
+
+  /** All registered capacities — used by the runner's pre-pass validator. */
+  def allCapacities: Map[String, ResourceCapacity[Any]] = synchronized {
+    capacities.toMap
+  }
+
   /** Release all resources */
   def releaseAll(): Unit = {
     portPool.releaseAll()
@@ -37,7 +67,7 @@ class ResourceManager(portPool: PortPool = new PortPool()) {
 }
 
 /**
- * Generic resource pool interface
+ * Generic resource pool interface — hands out discrete items (e.g. ports).
  */
 trait ResourcePool[T] {
   def acquire(): T
@@ -52,6 +82,70 @@ trait ResourcePool[T] {
     } finally {
       release(resource)
     }
+  }
+}
+
+/**
+ * Numeric capacity resource — allocates arbitrary amounts up to a cap
+ * (e.g. 1024 MB out of 4096 MB RAM). `acquire(amount)` blocks while the
+ * remaining capacity is insufficient.
+ *
+ * Used as a dependency of `liveResource(...)` via `cap.reserve(amount)`.
+ */
+trait ResourceCapacity[N] {
+  /** Total capacity. */
+  def capacity: N
+
+  /** Currently allocated amount. */
+  def used: N
+
+  /** Reserve `amount` units. Blocks until enough capacity is free. */
+  def acquire(amount: N): Unit
+
+  /** Try to reserve without blocking. Returns true if granted. */
+  def tryAcquire(amount: N): Boolean
+
+  /** Release `amount` units back to the capacity. */
+  def release(amount: N): Unit
+
+  /** Build a `Dep[N]` that reserves `amount` for the lifetime of the live
+    * resource that depends on it. */
+  def reserve(amount: N): Dep[N] = CapacityDep(this, amount)
+}
+
+/**
+ * Double-valued capacity. Suitable for RAM (in MB or GB), CPU shares, etc.
+ */
+class DoubleCapacity(val name: String, val capacity: Double)
+    extends ResourceCapacity[Double] {
+
+  private var _used: Double = 0.0
+  private val lock = new Object()
+
+  override def used: Double = lock.synchronized(_used)
+
+  override def tryAcquire(amount: Double): Boolean = lock.synchronized {
+    if (amount > capacity)
+      throw new IllegalArgumentException(
+        s"capacity '$name': requested $amount exceeds total capacity $capacity")
+    if (_used + amount <= capacity) {
+      _used += amount
+      true
+    } else false
+  }
+
+  override def acquire(amount: Double): Unit = lock.synchronized {
+    if (amount > capacity)
+      throw new IllegalArgumentException(
+        s"capacity '$name': requested $amount exceeds total capacity $capacity")
+    while (_used + amount > capacity) lock.wait()
+    _used += amount
+  }
+
+  override def release(amount: Double): Unit = lock.synchronized {
+    _used -= amount
+    if (_used < 0) _used = 0.0
+    lock.notifyAll()
   }
 }
 
