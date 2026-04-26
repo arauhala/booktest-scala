@@ -46,8 +46,11 @@ class MyTests extends TestSuite {
 | `t.key(key, value)` | Labeled key-value pair | Yes |
 | `t.assertln(condition)` | Assert and output OK/FAILED | Yes |
 | `t.assertln(label, cond)` | Assert with label | Yes |
-| `t.fail(msg)` | Mark test as failed | N/A |
-| `t.file(name)` | Get File in output dir | N/A |
+| `t.fail(msg)` | Mark test as failed (no exception) | N/A |
+| `t.f(text)` | Fail content — always marks test failed | Yes |
+| `t.fln(text)` | Fail content with newline | Yes |
+| `t.diff()` | Mark current line as a diff | N/A |
+| `t.file(name)` | Get File in test assets dir | N/A |
 
 Note: `t.tln` and `t.iln` can be called without parentheses to output an empty line.
 
@@ -339,6 +342,87 @@ class ExpensiveTests extends TestSuite {
 }
 ```
 
+### Review Workflow (AI-Assisted Evaluation)
+
+A structured way to collect items that need human (or AI) judgment, batch
+them at the end of a test, and decide pass/fail. Mirrors Python booktest's
+`start_review()` / `reviewln()` / `end_review()` flow.
+
+```scala
+class ModelReviewTests extends TestSuite {
+  def testGptOutput(t: TestCaseRun): Unit = {
+    val response = generateResponse("What is the capital of France?")
+
+    t.h1("GPT Response")
+    t.iln(response)
+
+    t.startReview()
+    // (label, value, passed)
+    //   passed = Some(true)  -> [OK]
+    //   passed = Some(false) -> [FAIL] (and instance is invalidated for retests)
+    //   passed = None        -> [REVIEW] (needs human/AI decision)
+    t.reviewln("Response is accurate", "Yes", Some(true))
+    t.reviewln("Response is concise", s"${response.length} chars", None)
+    // shorthand: condition -> [OK]/[FAIL]
+    t.reviewln("contains 'Paris'", response.contains("Paris"))
+
+    val allPassed = t.endReview()
+    if (!allPassed) t.iln(s"${t.getReviewItems.size} item(s) need attention")
+  }
+}
+```
+
+`startReview()` writes a `## Review Section` header. Each `reviewln`
+writes `[OK]`, `[FAIL]`, or `[REVIEW]` followed by the label and value.
+`endReview()` returns true when nothing needs review.
+
+### Snapshot Navigation (Advanced)
+
+Booktest's snapshot reader maintains a CURSOR over the expected output.
+By default each `t.tln` advances it linearly. For tests where order isn't
+fixed (e.g., dictionary iteration), seek the cursor before writing:
+
+```scala
+def testNonLinearOutput(t: TestCaseRun): Unit = {
+  // Headers automatically seek to a matching line in the snapshot.
+  // Use anchor/seek explicitly when content arrives in non-fixed order.
+
+  t.anchor("Total: ")           // seek to a line starting with "Total: ", then write the prefix
+  t.tln(s"$total")              // continues writing on that anchored line
+
+  t.anchorln("# Summary")       // seek to exact line, write it as tested
+
+  // Manual cursor control:
+  t.seekLine("Section A")       // exact match
+  t.seekPrefix("Item ")         // line-prefix match
+  t.seek(_.contains("FOOBAR"))  // arbitrary predicate
+  t.jump(42)                    // absolute line number
+}
+```
+
+For metric-style tolerance against the previous snapshot value, peek the
+next expected token without consuming it:
+
+```scala
+def testTolerantOutput(t: TestCaseRun): Unit = {
+  t.t("score: ")
+  val previous = t.peekDouble.getOrElse(0.0)  // previous value from snapshot
+  val current  = computeScore()
+  // emit previous if within 5%, else current — keeps snapshot stable
+  val toEmit = if (math.abs(current - previous) / previous < 0.05) previous else current
+  t.tln(toEmit.toString)
+}
+
+// Peek API:
+//   t.peekDouble: Option[Double]
+//   t.peekLong:   Option[Long]
+//   t.peekToken:  Option[String]
+//   t.skipToken(): Unit
+```
+
+`tmetric`, `tLongLn`, `tDoubleLn` use this internally — most tests don't
+need to touch peek directly.
+
 ### Live Resources
 
 Share an expensive `AutoCloseable` (database, HTTP server, process) across
@@ -530,14 +614,28 @@ sbt "Test/runMain booktest.BooktestMain --clean"
 | `-pN` | Parallel execution with N threads |
 | `-c, --continue` | Skip tests that passed in previous run |
 | `-S, --recapture` | Force regenerate all snapshots |
-| `-s, --update` | Auto-accept all snapshot changes |
+| `-s, --update` | Auto-accept all snapshot changes (DIFF and FAIL) |
+| `-a, --accept` | Auto-accept DIFF tests only (not FAIL) |
+| `--batch-review` | Sequential interactive review of all failures at end |
 | `--tree` | Hierarchical tree display (with `-l`) |
-| `--inline` | Show diffs inline during execution |
+| `--inline` | Show diffs inline during execution (default: at end) |
+| `--diff-style STYLE` | `unified` (default) / `side-by-side` / `inline` / `minimal` |
+| `--output-dir DIR` | Override output directory (default: `books`) |
+| `--snapshot-dir DIR` | Override snapshot directory (default: `books`) |
+| `--root PREFIX` | Override `root` from `booktest.ini` |
 | `--garbage` | List orphan files in books/ |
 | `--clean` | Remove orphan files and tmp directories |
 | `--invalidate-live-on-fail` | Force-close shared live resources after a consumer failure (default: keep alive) |
 | `--capacity NAME=VALUE` | Override a `capacity(NAME, _)` total at runtime |
 | `--help` | Show help |
+
+### Environment Variables
+
+| Variable | Effect |
+|---|---|
+| `BOOKTEST_PORT_BASE` | Port pool starting port (default: 10000) |
+| `BOOKTEST_PORT_MAX` | Port pool maximum port (default: 60000) |
+| `BOOKTEST_CAPACITY_<NAME>` | Override `capacity(name, _)` total (uppercase suffix) |
 
 ## Snapshot Directory Structure
 

@@ -425,6 +425,20 @@ Conventions:
   observable trace (setup count, execution order, cached value) is part of
   the snapshot. That's how we catch regressions in the runner itself.
 
+## Documentation Layout
+
+For coding agents and contributors choosing where to look:
+
+- **`README.md`** — overview, install, quick start, examples for the most-used features.
+- **`USAGE.md`** — long-form reference: every public method, CLI flag, env var, with examples.
+- **`llms.txt`** — same surface as USAGE.md but compressed for AI skimming. Keep in sync when API changes.
+- **`CLAUDE.md`** (this file) — codebase architecture, TDD workflow, Live Resources section. For people *working on* booktest.
+- **`CHANGELOG.md`** — release history.
+- **`.ai/plan/`** — design documents (current: live-resources).
+- **`booktest.ini`** — project test config (root, default group, exclude patterns).
+
+When changing public API: update `USAGE.md`, `llms.txt`, `README.md` (if it's a top-billed feature), and `CHANGELOG.md` in the same PR.
+
 ## Related Projects
 
-- [booktest (Python)](https://github.com/lumoa-oss/booktest) - The original Python implementation
+- [booktest (Python)](https://github.com/lumoa-oss/booktest) - The original Python implementation. Our API and snapshot format follow it closely; see `CHANGELOG.md` for any divergences.

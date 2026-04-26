@@ -204,13 +204,26 @@ design and a worked example.
 | `-t PATTERN` | Filter tests by name pattern |
 | `-w, --review` | Review mode (show diffs without running) |
 | `-S, --recapture` | Force regenerate all snapshots |
-| `-s, --update` | Auto-accept all snapshot changes |
+| `-s, --update` | Auto-accept all snapshot changes (DIFF and FAIL) |
+| `-a, --accept` | Auto-accept DIFF tests only (not FAIL) |
+| `--batch-review` | Sequential interactive review of failures at end |
 | `--tree` | Hierarchical tree display (with `-l`) |
 | `--inline` | Show diffs inline during execution |
+| `--diff-style STYLE` | `unified` / `side-by-side` / `inline` / `minimal` |
+| `--output-dir DIR` / `--snapshot-dir DIR` | Override `books/` location |
+| `--root PREFIX` | Override `root` from `booktest.ini` |
 | `--garbage` | List orphan files in books/ |
 | `--clean` | Remove orphan files and tmp directories |
 | `--invalidate-live-on-fail` | Force-close shared live resources after a consumer fails |
 | `--capacity NAME=VALUE` | Override a `capacity(NAME, _)` total at runtime |
+
+### Environment variables
+
+| Variable | Effect |
+|---|---|
+| `BOOKTEST_PORT_BASE` | Port pool starting port (default 10000) |
+| `BOOKTEST_PORT_MAX` | Port pool maximum (default 60000) |
+| `BOOKTEST_CAPACITY_<NAME>` | Override a `capacity(NAME, _)` total |
 
 ## Output Structure
 
@@ -231,9 +244,11 @@ books/
 
 ## Documentation
 
-- **[USAGE.md](USAGE.md)** - Detailed usage guide with all API methods and examples
-- **[CHANGELOG.md](CHANGELOG.md)** - Release history and changes
-- **[CLAUDE.md](CLAUDE.md)** - Development guidance and architecture details
+- **[USAGE.md](USAGE.md)** — Detailed usage guide with all API methods and examples
+- **[CHANGELOG.md](CHANGELOG.md)** — Release history and changes
+- **[CLAUDE.md](CLAUDE.md)** — Development guidance and architecture details
+- **[llms.txt](llms.txt)** — AI-friendly API summary (for coding agents)
+- **`.ai/plan/`** — Design documents (live resources, etc.)
 
 ## Examples
 
