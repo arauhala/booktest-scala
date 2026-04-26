@@ -7,7 +7,7 @@ This guide is for using booktest-scala as a testing framework in your Scala proj
 Add to your `build.sbt`:
 
 ```scala
-libraryDependencies += "io.github.arauhala" %% "booktest-scala" % "0.3.0" % Test
+libraryDependencies += "io.github.arauhala" %% "booktest-scala" % "0.4.0" % Test
 ```
 
 Cross-compiled for Scala 2.12, 2.13, and 3.3.
@@ -339,6 +339,114 @@ class ExpensiveTests extends TestSuite {
 }
 ```
 
+### Live Resources
+
+Share an expensive `AutoCloseable` (database, HTTP server, process) across
+many test consumers. The runner builds it on first use and closes it
+when the last consumer finishes. Pool/capacity allocations are held for
+the resource's lifetime.
+
+```scala
+class StringServer(port: Int, payload: String) extends AutoCloseable {
+  // ... starts/stops an HttpServer on `port` ...
+}
+
+class ServerTests extends TestSuite {
+  // Plain test producing serializable state — same as today.
+  val state: TestRef[String] = test("createState") { (t: TestCaseRun) =>
+    t.tln("State: hello world"); "hello world"
+  }
+
+  // Live resource: depends on `state` (a TestRef) and a port from the
+  // existing PortPool. Built once on first consumer; closed when the
+  // last consumer finishes; port returned to the pool inside close().
+  val server: ResourceRef[StringServer] =
+    liveResource("server", state, resources.ports) {
+      (s: String, port: Int) => new StringServer(port, s)
+    }
+
+  // Consumers depend on the ResourceRef and receive the live object.
+  test("clientGet", server) { (t: TestCaseRun, http: StringServer) =>
+    t.tln(s"GET /echo -> ${http.get("/echo")}")
+  }
+
+  test("clientLength", server) { (t: TestCaseRun, http: StringServer) =>
+    t.tln(s"length: ${http.get("/echo").length}")
+  }
+}
+```
+
+#### Sharing modes
+
+| Declaration | When to use |
+|---|---|
+| `liveResource(name, deps...) { build }` | Default. One instance, many concurrent readers. Tests promise not to mutate observable state. |
+| `liveResourceWithReset(name, deps...) { build } { reset }` | Stateful resource. Runner serializes consumer access (per-instance lock) and calls `reset(handle)` between consumers. Build/close still happen exactly once. |
+| `exclusiveResource(name, deps...) { build }` | Each consumer gets its own fresh instance. Equivalent to today's per-test setup/teardown. |
+
+#### Dependency types
+
+Mix freely in the dep list:
+
+- `TestRef[T]` — a prior test's return value (loaded from `.bin`, or
+  auto-run if missing).
+- `ResourceRef[T]` — another live resource. Refcount-shared; the runner
+  resolves transitively.
+- `ResourcePool[T]` — the existing pool API (e.g. `resources.ports`).
+  The acquired value is **held by the live resource for its lifetime**
+  and returned to the pool inside `close()`.
+- `ResourceCapacity[N].reserve(amount)` — see Capacity below.
+
+#### Capacity (numeric budgets)
+
+For RAM, CPU shares, GPU memory, etc., declare a `capacity` and reserve
+fractions per resource:
+
+```scala
+val ram = capacity("ram", 4096.0)  // 4 GB total
+
+val server: ResourceRef[Server] =
+  liveResource("server", ram.reserve(1024.0)) { (mb: Double) =>
+    new Server(allocatedMb = mb)
+  }
+```
+
+Capacities are **process-global** — multiple suites declaring `capacity("ram", N)`
+share one budget. Override the total at runtime:
+
+- `BOOKTEST_CAPACITY_RAM=8192` env var.
+- `--capacity ram=8192` CLI flag.
+
+The runner pre-validates that no single resource exceeds its capacity
+total (which would deadlock on acquire). Cross-resource sums are not
+validated statically — the runtime acquire path blocks safely if real
+demand exceeds capacity.
+
+#### Failure handling
+
+| Event | Action |
+|---|---|
+| `build` throws | Consumer FAILs with the cause; partial pool/capacity allocations released; sibling tests still run. |
+| `close` throws | Swallowed; allocations released anyway. |
+| `reset` throws | Instance invalidated; next consumer triggers a fresh build. |
+| Consumer fails on `withReset` | Instance always invalidated (state is unknown). |
+| Consumer fails on `SharedReadOnly` | Instance kept by default. Pass `--invalidate-live-on-fail` to force close + rebuild. |
+
+#### Verbose output
+
+`-v` prints lifecycle events and an end-of-run summary:
+
+```
+[build  myTests/server] 110 ms
+clientGet ok 142 ms
+clientLength ok 1 ms
+clientUpper ok 1 ms
+[close  myTests/server] 101 ms
+
+# live resources:
+  myTests/server: builds=1 closes=1 resets=0 alive=140 ms (build 110 ms, close 101 ms)
+```
+
 ## Configuration (`booktest.ini`)
 
 Create a `booktest.ini` in your project root:
@@ -427,6 +535,8 @@ sbt "Test/runMain booktest.BooktestMain --clean"
 | `--inline` | Show diffs inline during execution |
 | `--garbage` | List orphan files in books/ |
 | `--clean` | Remove orphan files and tmp directories |
+| `--invalidate-live-on-fail` | Force-close shared live resources after a consumer failure (default: keep alive) |
+| `--capacity NAME=VALUE` | Override a `capacity(NAME, _)` total at runtime |
 | `--help` | Show help |
 
 ## Snapshot Directory Structure
