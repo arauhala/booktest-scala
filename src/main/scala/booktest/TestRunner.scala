@@ -77,7 +77,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
   private val dependencyCache = new DependencyCache()
   private val resourceManager = ResourceManager.fromEnv()
   private val liveResources = {
-    val mgr = new LiveResourceManager(resourceManager)
+    val mgr = new LiveResourceManager()
     if (config.verbose) {
       mgr.listener = new LiveResourceListener {
         override def onBuild(name: String, durationMs: Long): Unit =

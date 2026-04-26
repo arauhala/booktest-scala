@@ -38,7 +38,6 @@ object LiveResourceListener {
   * than introducing a parallel hierarchy.
   */
 class LiveResourceManager(
-  @annotation.unused rm: ResourceManager,
   var listener: LiveResourceListener = LiveResourceListener.Noop
 ) {
 
@@ -86,7 +85,8 @@ class LiveResourceManager(
     * runner's pre-pass so the instance survives between tests that share
     * it. Without this, refcount would drop to 0 between tests, closing
     * the instance prematurely. */
-  def reserve(resourceName: String, @annotation.unused consumerTestName: String): Unit =
+  def reserve(resourceName: String, consumerTestName: String): Unit = {
+    val _ = consumerTestName  // reserved for symmetry with release(); suppresses -Wunused
     tableLock.synchronized {
       entries.get(resourceName).foreach { e =>
         e.defn.shareMode match {
@@ -95,6 +95,7 @@ class LiveResourceManager(
         }
       }
     }
+  }
 
   /** Get-or-build a live instance for a consumer.
     *
@@ -317,9 +318,10 @@ class LiveResourceManager(
 
   private def releaseShared(
     entry: SharedEntry,
-    @annotation.unused consumerTestName: String,
+    consumerTestName: String,
     invalidate: Boolean = false
   ): Unit = {
+    val _ = consumerTestName  // accepted for symmetry with releaseExclusive; suppresses -Wunused
     val toClose = tableLock.synchronized {
       entry.refCount -= 1
       // For SharedWithReset, mark "first consumer is now done" once the
