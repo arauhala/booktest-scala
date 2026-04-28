@@ -236,9 +236,9 @@ books/
 │   └── SuiteName/
 │       ├── testName/            # Tmp directory for test
 │       ├── testName.bin         # Return value cache (for dependencies)
-│       ├── testName.md          # Test output
+│       ├── testName.md          # Raw captured test output (compared against the committed snapshot)
 │       ├── testName.log         # Captured stdout/stderr
-│       ├── testName.txt         # Test report
+│       ├── testName.txt         # Per-line diff report with ?/./! markers, side-by-side expected vs actual, plus status/duration — matches Python booktest's `<name>.txt`. This is what humans/CI artifact viewers should look at after a flagged DIFF.
 │       └── testName.snapshots.json  # HTTP/function snapshots
 ├── SuiteName/                   # Final snapshots (committed to Git)
 │   └── testName.md
@@ -293,6 +293,67 @@ class MyTests extends TestSuite {
   }
 }
 ```
+
+### Lifecycle (runner-managed)
+
+The runner — not the test code — owns every live resource's lifecycle.
+A consumer test borrows the live instance for the length of one test
+case and never calls `.close()` on it.
+
+Phases for a single resource over one run:
+
+1. **Pre-pass refcount reservation.** Before any test executes,
+   `LiveResourceManager.reserve(...)` is called for each test's
+   transitive resource closure. Refcount keeps the instance alive
+   between consumers; without this, refcount would drop to 0 between
+   tests and close the instance prematurely.
+2. **First acquire = build.** `LiveResourceManager.acquire(...)`
+   resolves deps (`TestRef` → `.bin`, nested `ResourceRef` → recurse,
+   `ResourcePool` → acquire, `ResourceCapacity` → reserve) and runs
+   `build` exactly once under a per-resource build lock. Pool/capacity
+   allocations are stored against the instance and released in `close`.
+3. **Per-consumer acquire/release.** Concurrent vs. serialized depends
+   on share mode. `release(...)` decrements refcount; the runner
+   passes a `failed` flag so SharedWithReset can invalidate.
+4. **Last release = close.** When refcount drops to 0, `closeSharedInstance`
+   runs `close()` on the instance and releases stored allocations.
+   Exceptions from `close()` are swallowed — allocations are released
+   regardless.
+5. **End-of-run safety net.** `runner.shutdownAll()` runs in a `finally`
+   after the test loop force-closes any instance still alive plus any
+   per-consumer Exclusive holdings.
+
+Build runs on the first acquiring consumer's thread. Close runs inline
+on the last releasing consumer's thread. There's no separate lifecycle
+thread.
+
+### Consumer contract: do not close an injected handle
+
+The `T <: AutoCloseable` bound on `liveResource[T <: AutoCloseable]`
+exists to let the **runner** call `.close()` at end-of-life. It does
+not authorize consumers to do the same. A consumer that closes its
+injected handle (often via Scala's `using { handle => ... }` or a
+`finally handle.close()`) tears the shared instance down for every
+later consumer; the next test sees half-torn-down state and produces
+silent-corruption snapshots, and the runner double-closes at end of
+life.
+
+There is no runtime guard. A generic close-guard would have to wrap
+arbitrary `T`, which doesn't compose for sealed/final types or
+non-interface concrete classes — the wrapping has to be opt-in
+per-handle, which we haven't shipped. Treat the contract as part of
+the API:
+
+- A `ResourceRef[T]` value is **borrowed**, not owned.
+- Never call `.close()` on it. Never pass it to anything that does
+  (`using`, try-with-resources, scope-bound helpers).
+- If a test genuinely needs to own its instance — short-lived state,
+  destructive teardown — declare with `exclusiveResource(...)` instead
+  so the runner builds a fresh instance per consumer.
+
+If a migration produces flaky DIFFs that hit the second consumer of a
+shared resource and pass on the first, suspect a stray `using`/`close`
+on the injected handle.
 
 ### Choosing a sharing mode
 

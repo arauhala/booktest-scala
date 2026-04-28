@@ -141,6 +141,20 @@ class ServerTests extends TestSuite {
 Sharing modes: `liveResource` (shared, concurrent readers; default) | `liveResourceSerialized` (shared, one consumer at a time, no reset) | `liveResourceWithReset(...)(...)(reset)` (shared, serialized, reset between consumers) | `exclusiveResource` (per-consumer instance).
 Dep types in the dep list: `TestRef[T]` | `ResourceRef[T]` | `ResourcePool[T]` | `ResourceCapacity[N].reserve(amount)`.
 
+**Lifecycle is runner-managed.** Pre-pass refcount-reservation → first
+acquire builds (resolves deps, acquires pool/capacity slots) → consumers
+borrow under share-mode rules → last release closes (and returns
+pool/capacity allocations) → end-of-run `shutdownAll` force-closes any
+stragglers. Build runs once on the first consumer's thread under a
+per-resource build lock; close runs inline on the last releaser's thread.
+
+**Consumer contract: do not call `.close()` on an injected handle.**
+The `T <: AutoCloseable` bound exists for the runner, not for tests.
+A consumer that closes its handle (often via Scala's `using { ... }`)
+tears the instance down for every later consumer and corrupts their
+snapshots silently. If a test genuinely needs to own its instance,
+use `exclusiveResource(...)` instead.
+
 `PortPool` (used by `resources.ports`): rotates issued ports rather than
 sticking to the lowest free one, and applies a kernel-settle cooldown
 between release and re-issue (default 250ms). Override via
@@ -205,9 +219,9 @@ books/
 ├── .out/                      # gitignored — runtime artifacts
 │   └── <suite>/
 │       ├── <test>.bin         # cached return value (for deps)
-│       ├── <test>.md          # incremental output (compared against snapshot)
+│       ├── <test>.md          # raw captured output (compared against snapshot)
 │       ├── <test>.log         # captured stdout/stderr
-│       ├── <test>.txt         # report
+│       ├── <test>.txt         # per-line diff report (?/./! markers, side-by-side) + status — match Python booktest. CI artifact viewers should land here for a flagged DIFF.
 │       └── <test>/            # tmpDir for the test
 ├── <suite>/
 │   ├── <test>.md              # COMMITTED snapshot (the spec)

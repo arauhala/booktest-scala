@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### `<test>.txt` matches Python booktest
+
+`<outDir>/.out/<suite>/<test>.txt` previously contained only a one-line
+`Test 'X' completed in Xms` summary, so CI artifact viewers landing on
+it after a flagged DIFF showed nothing useful. It now mirrors Python
+booktest: the full per-line diff report with `?` / `.` / `!` markers
+and side-by-side expected vs actual, followed by the status/duration
+line. The data was already built up in memory (`diffReportBuffer`) — it
+just wasn't being persisted.
+
+### Live resource docs: lifecycle and consumer-borrow contract
+
+Added explicit "Lifecycle (runner-managed)" and "Consumer contract: do
+not close an injected handle" sections to USAGE.md, llms.txt, and
+CLAUDE.md. Lifecycle walks build → first acquire → per-consumer
+borrow → last release → close → shutdownAll safety net. The contract
+section makes the implicit `T <: AutoCloseable` rule explicit: the
+bound exists for the runner; consumers borrow, never own.
+
+No runtime close-guard for injected handles yet (requires per-handle
+opt-in wrapping; deferred until requested).
+
 ## 0.4.1 (2026-04-28)
 
 ### Hardening from real-world parallel use

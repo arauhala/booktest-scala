@@ -483,6 +483,70 @@ class ServerTests extends TestSuite {
 }
 ```
 
+#### Lifecycle: who builds, who closes
+
+A live resource's lifecycle is **fully managed by the runner**. The
+runner is the only thing that calls `build` and the only thing that
+calls `close()`. Consumers only borrow the live instance for the
+duration of one test.
+
+The full lifecycle of one resource in a single run:
+
+1. **Pre-pass — refcount reservation.** Before any test executes, the
+   runner walks the set of selected tests and increments a refcount on
+   every live resource each one transitively depends on. This is what
+   keeps an instance alive across tests that share it: the refcount
+   doesn't drop to zero until the last consumer has released.
+2. **First acquire — build.** When the first consumer starts, the
+   runner resolves the resource's deps (loading `TestRef`s from
+   `.bin`, recursing into nested `ResourceRef`s, acquiring pool slots,
+   reserving capacity) and invokes the `build` closure exactly once.
+   Pool/capacity allocations made during this step are held for the
+   resource's lifetime — they are NOT released back per consumer.
+3. **Per-consumer acquire/release.** Each consumer receives the live
+   instance via dep injection. Concurrent vs serialized depends on
+   share mode (see table below). The runner records the borrow on
+   acquire and decrements the refcount on release.
+4. **Last release — close.** When the last consumer's release drops
+   the refcount to zero, the runner calls `close()` on the instance
+   and releases every pool/capacity allocation back to its pool.
+5. **End-of-run safety net.** `runner.shutdownAll()` runs in a
+   `finally` after the test loop and force-closes any instances still
+   alive, so a crash mid-run can't leak processes/ports.
+
+Build is invoked on the thread of whichever consumer first acquires
+the resource (under a per-resource build lock so concurrent first
+consumers don't each build their own). Close is called inline at the
+last release, on the thread of whichever consumer releases last.
+
+#### Consumer contract: do not close the injected handle
+
+> **Calling `.close()` on a `ResourceRef`-injected handle is never
+> correct.** The `T <: AutoCloseable` bound exists so the runner can
+> close the instance at end-of-life — it does not authorize consumers
+> to do the same.
+
+The handle a consumer receives is **borrowed**, not owned: the runner
+owns lifecycle and refcount. A consumer that calls `close()` (often
+indirectly, e.g. through Scala's `using { handle => ... }` or a
+try-with-resources idiom) closes the underlying instance out from
+under every other consumer that hasn't run yet, leading to silent
+corruption: the next consumer either sees a half-torn-down service
+and produces nonsense snapshots, or the runner double-closes at end
+of life.
+
+If you're migrating from a per-test setup/teardown pattern where the
+consumer owned the handle, scrub `using` / `Try { ... } finally
+handle.close()` calls from any test that takes a `ResourceRef`-injected
+parameter. If a per-consumer fresh instance is genuinely required,
+declare with `exclusiveResource(...)` instead — that gives each
+consumer its own instance to own.
+
+There is no runtime guard for this today (a generic close-guard would
+require wrapping arbitrary `T`, which doesn't compose for sealed/final
+types). Tests that mis-close are a quiet footgun; treat the contract
+as part of the API.
+
 #### Sharing modes
 
 | Declaration | When to use |
@@ -670,7 +734,8 @@ books/
 │   └── SuiteName/
 │       ├── testName/            # Tmp directory for test
 │       ├── testName.bin         # Return value cache (for dependencies)
-│       ├── testName.md          # Test output
+│       ├── testName.md          # Test output (raw captured content)
+│       ├── testName.txt         # Per-line diff report + status/duration
 │       ├── testName.log         # Captured stdout/stderr
 │       └── testName.snapshots.json  # HTTP/function snapshots
 ├── SuiteName/                   # Committed snapshots
@@ -678,6 +743,16 @@ books/
 │   └── testName/                # Asset directory (images, etc.)
 └── cases.ndjson                 # Test results for continue mode
 ```
+
+### What each `.out/<suite>/<test>.*` file contains
+
+| File | Purpose |
+|---|---|
+| `<test>.md` | The raw captured test output. This is what gets compared (or copied) to the committed snapshot at `books/<Suite>/<test>.md`. CI snapshot drift is best inspected here. |
+| `<test>.txt` | The human-readable diff report (every line with `?` / `.` / `!` markers and side-by-side expected vs actual), followed by a final status/duration line. Mirrors Python booktest's per-test `.txt`. **This is the file CI artifact viewers should land on after a flagged DIFF** — it explains what changed without you having to diff `.md` against the snapshot manually. |
+| `<test>.log` | Captured stdout/stderr produced during the test (from `println`, logging, etc.). |
+| `<test>.bin` | Cached return value for dependency injection between tests (`@DependsOn` / `test(name, dep)`). Deleted when a test FAILs. |
+| `<test>.snapshots.json` | HTTP / function-call snapshots used by `HttpSnapshotting`, `EnvSnapshotting`, `FunctionSnapshotting`. |
 
 ## Workflow
 
