@@ -121,6 +121,10 @@ class LiveResourceManager(
         acquireExclusive[T](entry, resourceName, consumerTestName, resolveDep)
       case ShareMode.SharedReadOnly =>
         acquireShared[T](entry, resolveDep, resetOnReuse = false)
+      case ShareMode.SharedSerialized =>
+        // Serialize access; no reset between consumers.
+        entry.instanceLock.lock()
+        acquireShared[T](entry, resolveDep, resetOnReuse = false)
       case ShareMode.SharedWithReset(_) =>
         // Serialize access; reset between consumers.
         entry.instanceLock.lock()
@@ -153,6 +157,13 @@ class LiveResourceManager(
         case ShareMode.SharedReadOnly =>
           val invalidate = failed && invalidateOnFail
           releaseShared(entry, consumerTestName, invalidate)
+        case ShareMode.SharedSerialized =>
+          // Same invalidation policy as SharedReadOnly (no implicit reset),
+          // but consumers are serialized so we must release the lock too.
+          val invalidate = failed && invalidateOnFail
+          try releaseShared(entry, consumerTestName, invalidate)
+          finally if (entry.instanceLock.isHeldByCurrentThread)
+            entry.instanceLock.unlock()
         case ShareMode.SharedWithReset(_) =>
           // SharedWithReset always invalidates on failure: state is unknown
           // since the consumer aborted mid-use.

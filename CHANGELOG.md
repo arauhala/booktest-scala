@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.4.1 (2026-04-28)
+
+### Hardening from real-world parallel use
+
+Driven by the aito-core migration to 0.4.0 — issues surfaced under
+`-p2`/`-p4`/`-p8` after a clean sequential migration.
+
+- **`liveResourceSerialized(name, deps...)(build)`** — new sharing mode
+  for "shared, but consumers run one at a time, no reset closure
+  required". Sits between `liveResource` (concurrent readers) and
+  `liveResourceWithReset` (serialized + reset + always-invalidate-on-fail).
+  Useful for resources that are read-only at the consumer level but
+  produce snapshot output that's not safe to interleave.
+- **PortPool rotation + cooldown**. `resources.ports` previously always
+  returned the lowest-numbered free port and used a non-`SO_REUSEADDR`
+  probe, which under `-pN` could re-issue a just-released port before
+  the kernel had finished tearing down the previous listener — the next
+  Akka/Netty bind on that port would then fail with `BindException:
+  Address already in use`. The pool now:
+  - prefers ports never used (then longest-released) over the lowest
+    free port, so port reuse rotates organically;
+  - applies a cooldown between release and re-issue (default 250ms,
+    `BOOKTEST_PORT_COOLDOWN_MS=N` to override; `0` disables);
+  - probes with `SO_REUSEADDR=true` and an explicit bind so the probe
+    matches what most server libs do at bind time.
+- **Errors no longer abort the batch**. `runTestCase` previously caught
+  only `Exception`, so a test throwing an `Error` subclass (e.g.
+  `NotImplementedError`, `AssertionError`) escaped into the suite-level
+  loop and prevented every test queued after it from running. The catch
+  is now `NonFatal`, and the diff message unwraps reflection's
+  `InvocationTargetException` so reports show the underlying cause
+  instead of `failed with exception: null`.
+
 ## 0.4.0 (2026-04-26)
 
 ### Live resources

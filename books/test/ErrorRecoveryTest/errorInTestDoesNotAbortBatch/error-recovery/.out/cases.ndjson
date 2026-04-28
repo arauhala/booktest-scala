@@ -1,0 +1,2 @@
+{"name":"booktest/test/ErrorThrowingHelper/throwsAssertion","result":"FAIL","duration_ms":83}
+{"name":"booktest/test/ErrorThrowingHelper/runsAfterError","result":"DIFF","duration_ms":1}

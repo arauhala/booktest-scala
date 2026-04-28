@@ -1,0 +1,20 @@
+
+# test results:
+
+  booktest/test/LiveResourceIntegrationTest$$anon$1/brokenProducer..FAILED in 4 ms
+  booktest/test/LiveResourceIntegrationTest$$anon$1/usesHandle..  booktest/test/LiveResourceIntegrationTest$$anon$1/brokenProducer..FAILED in 3 ms
+FAILED in 6 ms
+
+============================================================
+[91m# 2 test(s) with differences:[39m
+============================================================
+
+[93m## booktest/test/LiveResourceIntegrationTest$$anon$1/brokenProducer[39m
+----------------------------------------
+Test 'brokenProducer' failed with exception: producer is broken
+
+[93m## booktest/test/LiveResourceIntegrationTest$$anon$1/usesHandle[39m
+----------------------------------------
+Test 'usesHandle' failed with exception: Dependency 'brokenProducer' failed when auto-run for test 'usesHandle'
+
+============================================================

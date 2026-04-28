@@ -34,6 +34,13 @@ object ShareMode {
   case object SharedReadOnly extends ShareMode[Nothing]
   /** Each consumer gets its own instance (build + close per consumer). */
   case object Exclusive extends ShareMode[Nothing]
+  /** Shared, but the runner serializes consumer access. No reset is called
+    * between consumers — the instance keeps whatever state the previous
+    * consumer left it in. Use when the resource is logically read-only at
+    * the consumer level but produces snapshot output that isn't safe to
+    * interleave (e.g. shared logger writes). Not auto-invalidated on
+    * consumer failure (same policy as SharedReadOnly). */
+  case object SharedSerialized extends ShareMode[Nothing]
   /** Shared, but the runner serializes consumer access and calls reset
     * between consumers. */
   final case class SharedWithReset[T](reset: T => Unit) extends ShareMode[T]

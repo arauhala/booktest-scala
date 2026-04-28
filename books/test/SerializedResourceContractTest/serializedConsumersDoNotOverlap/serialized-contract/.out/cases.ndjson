@@ -1,0 +1,4 @@
+{"name":"booktest/test/SerializedContractHelper/c4","result":"DIFF","duration_ms":43}
+{"name":"booktest/test/SerializedContractHelper/c2","result":"DIFF","duration_ms":98}
+{"name":"booktest/test/SerializedContractHelper/c1","result":"DIFF","duration_ms":141}
+{"name":"booktest/test/SerializedContractHelper/c3","result":"DIFF","duration_ms":183}

@@ -299,6 +299,7 @@ class MyTests extends TestSuite {
 | Declaration | When to use |
 |---|---|
 | `liveResource(name, deps...) { build }` | Default. Multiple consumers use the **same** instance concurrently. Tests promise not to mutate observable state. |
+| `liveResourceSerialized(name, deps...) { build }` | One instance, but the runner serializes consumer access. No reset closure runs between consumers — state from one consumer carries into the next. Use when the resource is read-only at the consumer level but produces snapshot output that is not safe to interleave (shared loggers, multiline reports). |
 | `liveResource.withReset` (`liveResourceWithReset(name, deps...) { build } { reset }`) | Tests mutate state but the reset closure brings it back to a known baseline. The runner serializes consumer access on this instance and calls `reset(handle)` between consumers. Build/close still happen exactly once. |
 | `exclusiveResource(name, deps...) { build }` | Each consumer gets its **own** fresh instance. Use when sharing isn't safe at all. Equivalent to today's per-test setup/teardown. |
 
@@ -348,8 +349,9 @@ the run fails fast with the offending reservations listed.
   build.
 - **consumer fails on `withReset`** → instance always invalidated (state is
   unknown).
-- **consumer fails on `SharedReadOnly`** → instance kept by default. Pass
-  `--invalidate-live-on-fail` to force close + rebuild after any failure.
+- **consumer fails on `SharedReadOnly` or `SharedSerialized`** → instance kept
+  by default. Pass `--invalidate-live-on-fail` to force close + rebuild after
+  any failure.
 
 ### Verbose output
 

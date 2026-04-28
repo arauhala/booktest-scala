@@ -1,0 +1,4 @@
+booktest/test/SerializedContractHelper/c4	DIFF	43
+booktest/test/SerializedContractHelper/c2	DIFF	98
+booktest/test/SerializedContractHelper/c1	DIFF	141
+booktest/test/SerializedContractHelper/c3	DIFF	183
