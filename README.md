@@ -32,7 +32,7 @@ Booktest enables snapshot testing where tests write output to markdown files tha
 Add to your `build.sbt`:
 
 ```scala
-libraryDependencies += "io.github.arauhala" %% "booktest-scala" % "0.4.0" % Test
+libraryDependencies += "io.github.arauhala" %% "booktest-scala" % "0.4.1" % Test
 ```
 
 Cross-compiled for Scala 2.12, 2.13, and 3.3.

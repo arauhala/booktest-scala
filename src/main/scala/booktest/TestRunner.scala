@@ -3,6 +3,7 @@ package booktest
 import os.Path
 import fansi.Color
 import fansi.Color.{LightRed, LightGreen, LightYellow, LightCyan}
+import scala.util.control.NonFatal
 
 private[booktest] object Colors {
   val Orange = Color.True(255, 165, 0)
@@ -70,6 +71,15 @@ case class RunResult(
         out.println(s"  ${r.testName} - $status")
       }
     }
+  }
+}
+
+object TestRunner {
+  /** Unwrap reflection wrappers so reports show the underlying cause. */
+  private[booktest] def unwrapInvocationTarget(t: Throwable): Throwable = t match {
+    case ite: java.lang.reflect.InvocationTargetException if ite.getCause != null =>
+      unwrapInvocationTarget(ite.getCause)
+    case _ => t
   }
 }
 
@@ -284,9 +294,14 @@ class TestRunner(config: RunConfig = RunConfig()) {
       }
 
     } catch {
-      case e: Exception =>
+      case NonFatal(rawErr) =>
+        // Reflection wraps test-method exceptions in InvocationTargetException;
+        // unwrap so reports show the underlying cause, not "exception: null".
+        val e = TestRunner.unwrapInvocationTarget(rawErr)
         consumerFailed = true
         // Write exception to output like Python: t.iln(traceback.format_exc())
+        // NonFatal catches Errors like NotImplementedError/AssertionError too, so a
+        // single broken test doesn't poison the whole batch.
         testRun.iln()
         testRun.fail()
         testRun.iln(s"test raised exception ${e.getClass.getName}: ${e.getMessage}")
@@ -964,7 +979,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
                   val result = executeTestSilently(testCase, suiteName, suite)
                   reportQueue.put(TestReportMessage.Completed(testCase.name, result))
                 } catch {
-                  case e: Exception =>
+                  case NonFatal(rawErr) =>
+                    val e = TestRunner.unwrapInvocationTarget(rawErr)
                     val errorResult = TestResult(
                       testName = s"${config.getSuitePath(suiteName)}/${testCase.name}",
                       passed = false,
@@ -1173,7 +1189,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
       result.copy(testRun = Some(testRun))
 
     } catch {
-      case e: Exception =>
+      case NonFatal(rawErr) =>
+        val e = TestRunner.unwrapInvocationTarget(rawErr)
         consumerFailed = true
         testRun.end()
         logCapture.stop()

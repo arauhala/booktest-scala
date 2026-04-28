@@ -1,0 +1,2 @@
+Test 'usesHandle' FAILED: Dependency 'brokenProducer' failed when auto-run for test 'usesHandle'
+Duration: 6ms

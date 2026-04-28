@@ -1330,9 +1330,19 @@ class TestCaseRun(
     // If started, output was written incrementally — nothing to do
   }
   
+  /** Write the per-test `<test>.txt` report — mirrors Python booktest's
+    * `<name>.txt`. Contains the full per-line diff report (every committed
+    * line with `?` / `.` / `!` markers and side-by-side expected) plus the
+    * caller-supplied status/duration line at the end.
+    *
+    * Without this, CI artifact viewers that point at `<test>.txt` saw only
+    * a one-line "completed in Xms" summary and humans had to dig into the
+    * `<test>.md` capture to understand a flagged DIFF. */
   def writeReport(message: String): Unit = {
     os.makeDir.all(reportFile / os.up)
-    os.write.over(reportFile, message)
+    val body = if (diffReportBuffer.isEmpty) message
+               else s"${diffReportBuffer.toString}\n$message"
+    os.write.over(reportFile, body)
   }
   
   def acceptSnapshot(): Unit = {

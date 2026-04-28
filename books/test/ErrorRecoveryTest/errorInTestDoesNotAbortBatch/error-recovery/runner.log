@@ -1,0 +1,18 @@
+
+# test results:
+
+  booktest/test/ErrorThrowingHelper/throwsAssertion..FAILED in 83 ms
+  booktest/test/ErrorThrowingHelper/runsAfterError..[93mDIFF[39m 1 ms
+
+============================================================
+[91m# 2 test(s) with differences:[39m
+============================================================
+
+[93m## booktest/test/ErrorThrowingHelper/throwsAssertion[39m
+----------------------------------------
+Test 'throwsAssertion' failed with exception: not done yet
+
+[93m## booktest/test/ErrorThrowingHelper/runsAfterError[39m
+----------------------------------------
+
+============================================================

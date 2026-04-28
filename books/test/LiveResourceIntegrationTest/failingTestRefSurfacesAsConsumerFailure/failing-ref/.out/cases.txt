@@ -1,0 +1,2 @@
+booktest/test/LiveResourceIntegrationTest$$anon$1/brokenProducer	FAIL	4
+booktest/test/LiveResourceIntegrationTest$$anon$1/usesHandle	FAIL	6

@@ -1,0 +1,2 @@
+booktest/test/BuildThrowingHelper/triesToUse	FAIL	2
+booktest/test/BuildThrowingHelper/unrelatedSibling	DIFF	0

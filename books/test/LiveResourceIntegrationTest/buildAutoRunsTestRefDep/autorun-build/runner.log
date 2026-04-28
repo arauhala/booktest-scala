@@ -1,0 +1,14 @@
+
+# test results:
+
+  booktest/test/AutoRunHelper/consumer..  booktest/test/AutoRunHelper/producer..[93mDIFF[39m 0 ms
+[93mDIFF[39m 2 ms
+
+============================================================
+[91m# 1 test(s) with differences:[39m
+============================================================
+
+[93m## booktest/test/AutoRunHelper/consumer[39m
+----------------------------------------
+
+============================================================

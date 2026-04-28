@@ -1,0 +1,2 @@
+Test 'triggersBuild' FAILED: partial build failure
+Duration: 43ms
