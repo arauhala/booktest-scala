@@ -1,0 +1,2 @@
+Test 'brokenProducer' FAILED: producer is broken
+Duration: 3ms

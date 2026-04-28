@@ -1,0 +1,2 @@
+booktest/test/ContinueModeHelper/first	OK	0
+booktest/test/ContinueModeHelper/second	OK	1

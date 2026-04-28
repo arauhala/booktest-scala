@@ -7,7 +7,7 @@ This guide is for using booktest-scala as a testing framework in your Scala proj
 Add to your `build.sbt`:
 
 ```scala
-libraryDependencies += "io.github.arauhala" %% "booktest-scala" % "0.4.0" % Test
+libraryDependencies += "io.github.arauhala" %% "booktest-scala" % "0.4.1" % Test
 ```
 
 Cross-compiled for Scala 2.12, 2.13, and 3.3.
@@ -41,8 +41,8 @@ class MyTests extends TestSuite {
 | `t.h3(text)` | Level 3 header | Yes |
 | `t.tln(text)` | Test line with newline | Yes |
 | `t.t(text)` | Test text (no newline) | Yes |
-| `t.iln(text)` | Info line with newline | No |
-| `t.i(text)` | Info text (no newline) | No |
+| `t.iln(text)` | Info line with newline | Info-only (cyan) |
+| `t.i(text)` | Info text (no newline) | Info-only (cyan) |
 | `t.key(key, value)` | Labeled key-value pair | Yes |
 | `t.assertln(condition)` | Assert and output OK/FAILED | Yes |
 | `t.assertln(label, cond)` | Assert with label | Yes |
@@ -53,6 +53,29 @@ class MyTests extends TestSuite {
 | `t.file(name)` | Get File in test assets dir | N/A |
 
 Note: `t.tln` and `t.iln` can be called without parentheses to output an empty line.
+
+#### How info content interacts with snapshots
+
+`t.i` / `t.iln` content is written into the same `.md` snapshot file as
+`t.t` / `t.tln` — there is no separate sidecar. The difference is in how
+diffs are reported:
+
+- A token mismatch produced by `t.t` / `tln` increments the test's diff
+  counter, surfacing as a yellow `?` diff line and a DIFF result.
+- A token mismatch produced by `t.i` / `iln` increments only the
+  *info-diff* counter, surfacing as a cyan `.` line. It does NOT fail
+  the test.
+
+This is why `t.t("parsing..").iMsLn { ... }` is safe: the timing token
+is info-typed, so a `0ms` snapshot can match a `7ms` actual run with
+just an info-diff. Tokens are aligned 1:1 with the snapshot stream
+regardless of type, so a length-changing info value does not cascade
+into a diff on neighboring `t.t` content.
+
+If you do not want timings (or any volatile value) baked into the
+snapshot at all, write them with `println` to the test log instead, or
+use `t.iMsLn`'s sibling helpers and accept the cyan info-diffs as
+intended.
 
 ### Metrics with Tolerance
 
@@ -465,6 +488,7 @@ class ServerTests extends TestSuite {
 | Declaration | When to use |
 |---|---|
 | `liveResource(name, deps...) { build }` | Default. One instance, many concurrent readers. Tests promise not to mutate observable state. |
+| `liveResourceSerialized(name, deps...) { build }` | One instance, but consumers run **one at a time** (per-instance lock). No reset is called between consumers — state from the previous consumer persists. Use when the resource is read-only at the consumer level but produces snapshot output that's not safe to interleave (shared loggers, multiline report builders). Same fail-keep policy as the default `liveResource`. |
 | `liveResourceWithReset(name, deps...) { build } { reset }` | Stateful resource. Runner serializes consumer access (per-instance lock) and calls `reset(handle)` between consumers. Build/close still happen exactly once. |
 | `exclusiveResource(name, deps...) { build }` | Each consumer gets its own fresh instance. Equivalent to today's per-test setup/teardown. |
 
@@ -514,7 +538,7 @@ demand exceeds capacity.
 | `close` throws | Swallowed; allocations released anyway. |
 | `reset` throws | Instance invalidated; next consumer triggers a fresh build. |
 | Consumer fails on `withReset` | Instance always invalidated (state is unknown). |
-| Consumer fails on `SharedReadOnly` | Instance kept by default. Pass `--invalidate-live-on-fail` to force close + rebuild. |
+| Consumer fails on `SharedReadOnly` or `SharedSerialized` | Instance kept by default. Pass `--invalidate-live-on-fail` to force close + rebuild. |
 
 #### Verbose output
 
@@ -635,6 +659,7 @@ sbt "Test/runMain booktest.BooktestMain --clean"
 |---|---|
 | `BOOKTEST_PORT_BASE` | Port pool starting port (default: 10000) |
 | `BOOKTEST_PORT_MAX` | Port pool maximum port (default: 60000) |
+| `BOOKTEST_PORT_COOLDOWN_MS` | Cooldown between releasing and re-issuing the same port (default: 250). Prevents the kernel from racing a fresh bind against the previous listener's teardown. Set to 0 to disable. |
 | `BOOKTEST_CAPACITY_<NAME>` | Override `capacity(name, _)` total (uppercase suffix) |
 
 ## Snapshot Directory Structure

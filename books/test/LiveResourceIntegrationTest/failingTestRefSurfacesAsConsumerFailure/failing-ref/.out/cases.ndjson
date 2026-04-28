@@ -1,0 +1,2 @@
+{"name":"booktest/test/LiveResourceIntegrationTest$$anon$1/brokenProducer","result":"FAIL","duration_ms":4}
+{"name":"booktest/test/LiveResourceIntegrationTest$$anon$1/usesHandle","result":"FAIL","duration_ms":6}

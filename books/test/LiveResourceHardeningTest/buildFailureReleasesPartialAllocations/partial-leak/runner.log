@@ -1,0 +1,14 @@
+
+# test results:
+
+  booktest/test/LeakingBuildHelper/triggersBuild..FAILED in 43 ms
+
+============================================================
+[91m# 1 test(s) with differences:[39m
+============================================================
+
+[93m## booktest/test/LeakingBuildHelper/triggersBuild[39m
+----------------------------------------
+Test 'triggersBuild' failed with exception: partial build failure
+
+============================================================

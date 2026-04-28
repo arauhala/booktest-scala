@@ -1,0 +1,2 @@
+booktest/test/ErrorThrowingHelper/throwsAssertion	FAIL	83
+booktest/test/ErrorThrowingHelper/runsAfterError	DIFF	1

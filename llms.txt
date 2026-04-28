@@ -15,7 +15,7 @@
 ## Installation
 
 ```scala
-libraryDependencies += "io.github.arauhala" %% "booktest-scala" % "0.4.0" % Test
+libraryDependencies += "io.github.arauhala" %% "booktest-scala" % "0.4.1" % Test
 ```
 
 Cross-compiled for Scala 2.12, 2.13, and 3.3.
@@ -46,9 +46,10 @@ Run: `sbt 'Test/runMain booktest.BooktestMain my.MyTests'`. First run writes
 | `def testFoo(t: TestCaseRun): T` | Method-style test (auto-discovered if name starts with `test`) |
 | `test(name)(body)` | Method-ref style test, returns `TestRef[T]` |
 | `test(name, dep1, dep2)(body)` | With type-safe dependencies (up to 3) |
-| `liveResource(name, deps...)(build)` | Shared `AutoCloseable` across consumers |
+| `liveResource(name, deps...)(build)` | Shared `AutoCloseable` across consumers (concurrent readers) |
+| `liveResourceSerialized(name, deps...)(build)` | Shared, but consumers run one at a time (no reset) |
 | `exclusiveResource(name, deps...)(build)` | Per-consumer instance |
-| `liveResourceWithReset(name, deps...)(build)(reset)` | Shared with reset between consumers |
+| `liveResourceWithReset(name, deps...)(build)(reset)` | Shared, serialized, reset between consumers |
 | `capacity(name, total)` | Numeric budget (RAM, CPU shares) |
 | `setup(t)` / `teardown(t)` | Per-test hooks (override) |
 | `beforeAll()` / `afterAll()` | Per-suite hooks (override) |
@@ -69,12 +70,15 @@ Run: `sbt 'Test/runMain booktest.BooktestMain my.MyTests'`. First run writes
 - `timage(file, caption)` — image (hashed, stored in assets dir, referenced in snapshot)
 - `tUsPerOpLn(opCount, label)(block)` — time block, output µs/op as test line
 
-**Output (info — NOT tested)**:
-- `i(text)` / `iln(text)` — info content
+**Output (info — written to the same `.md` snapshot but not test-fail-on-diff)**:
+- `i(text)` / `iln(text)` — info content; mismatches surface as cyan `.` info-diffs (don't fail)
 - `imetric(label, value)` — info metric (no tolerance check)
 - `itable(...)` / `iimage(file, caption)` — info versions
 - `iMsLn(block)` — execute block, log elapsed ms as info, return result
 - `iUsPerOpLn(opCount, label)(block)` — info µs/op
+- Token alignment between `t` and `i` is per-token, so a length-changing
+  info value (e.g. `"7ms"` vs `"0ms"`) does NOT cascade into a diff on
+  neighboring `t` content.
 
 **Failure**:
 - `f(text)` / `fln(text)` — fail content (always marks test failed)
@@ -134,8 +138,14 @@ class ServerTests extends TestSuite {
 }
 ```
 
-Sharing modes: `liveResource` (shared, default) | `liveResourceWithReset(...)(...)(reset)` | `exclusiveResource`.
+Sharing modes: `liveResource` (shared, concurrent readers; default) | `liveResourceSerialized` (shared, one consumer at a time, no reset) | `liveResourceWithReset(...)(...)(reset)` (shared, serialized, reset between consumers) | `exclusiveResource` (per-consumer instance).
 Dep types in the dep list: `TestRef[T]` | `ResourceRef[T]` | `ResourcePool[T]` | `ResourceCapacity[N].reserve(amount)`.
+
+`PortPool` (used by `resources.ports`): rotates issued ports rather than
+sticking to the lowest free one, and applies a kernel-settle cooldown
+between release and re-issue (default 250ms). Override via
+`BOOKTEST_PORT_COOLDOWN_MS` env var. Range via `BOOKTEST_PORT_BASE` /
+`BOOKTEST_PORT_MAX` (default 10000–60000).
 
 Capacity: `val ram = capacity("ram", 4096.0)`; override via `BOOKTEST_CAPACITY_RAM=8192` or `--capacity ram=8192`.
 

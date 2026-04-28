@@ -241,6 +241,38 @@ abstract class TestSuite {
       vs => build(vs(0).asInstanceOf[D1], vs(1).asInstanceOf[D2]),
       ShareMode.Exclusive))
 
+  // ---- SharedSerialized: shared instance, serialized consumers, no reset ----
+
+  def liveResourceSerialized[T <: AutoCloseable]
+      (name: String)
+      (build: => T): ResourceRef[T] =
+    registerLiveResource(LiveResourceDef[T](
+      name, List.empty, _ => build, ShareMode.SharedSerialized))
+
+  def liveResourceSerialized[T <: AutoCloseable, D1]
+      (name: String, dep1: Dep[D1])
+      (build: D1 => T): ResourceRef[T] =
+    registerLiveResource(LiveResourceDef[T](
+      name, List(dep1),
+      vs => build(vs(0).asInstanceOf[D1]),
+      ShareMode.SharedSerialized))
+
+  def liveResourceSerialized[T <: AutoCloseable, D1, D2]
+      (name: String, dep1: Dep[D1], dep2: Dep[D2])
+      (build: (D1, D2) => T): ResourceRef[T] =
+    registerLiveResource(LiveResourceDef[T](
+      name, List(dep1, dep2),
+      vs => build(vs(0).asInstanceOf[D1], vs(1).asInstanceOf[D2]),
+      ShareMode.SharedSerialized))
+
+  def liveResourceSerialized[T <: AutoCloseable, D1, D2, D3]
+      (name: String, dep1: Dep[D1], dep2: Dep[D2], dep3: Dep[D3])
+      (build: (D1, D2, D3) => T): ResourceRef[T] =
+    registerLiveResource(LiveResourceDef[T](
+      name, List(dep1, dep2, dep3),
+      vs => build(vs(0).asInstanceOf[D1], vs(1).asInstanceOf[D2], vs(2).asInstanceOf[D3]),
+      ShareMode.SharedSerialized))
+
   // ---- SharedWithReset: shared instance, reset between consumers ----
 
   def liveResourceWithReset[T <: AutoCloseable]

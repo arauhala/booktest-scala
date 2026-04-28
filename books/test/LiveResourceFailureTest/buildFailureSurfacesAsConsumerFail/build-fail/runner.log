@@ -1,0 +1,18 @@
+
+# test results:
+
+  booktest/test/BuildThrowingHelper/triesToUse..FAILED in 2 ms
+  booktest/test/BuildThrowingHelper/unrelatedSibling..[93mDIFF[39m 0 ms
+
+============================================================
+[91m# 2 test(s) with differences:[39m
+============================================================
+
+[93m## booktest/test/BuildThrowingHelper/triesToUse[39m
+----------------------------------------
+Test 'triesToUse' failed with exception: boom on build
+
+[93m## booktest/test/BuildThrowingHelper/unrelatedSibling[39m
+----------------------------------------
+
+============================================================
