@@ -1,0 +1,3 @@
+  consumer path matches in-run producer path: true
+
+Test 'consumer' completed in 0ms

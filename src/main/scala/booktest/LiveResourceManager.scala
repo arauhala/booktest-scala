@@ -38,8 +38,20 @@ object LiveResourceListener {
   * than introducing a parallel hierarchy.
   */
 class LiveResourceManager(
-  var listener: LiveResourceListener = LiveResourceListener.Noop
+  var listener: LiveResourceListener = LiveResourceListener.Noop,
+  trace: TaskTrace = TaskTrace.Noop
 ) {
+
+  import java.time.Instant
+
+  /** Hex of `System.identityHashCode` for a live instance. Stable for
+    * the lifetime of one JVM build; unique enough for trace events to
+    * disambiguate "same handle as the previous event" from "different
+    * handle." */
+  private def instanceId(o: Any): String = o match {
+    case ref: AnyRef => TaskTrace.identityHash(ref)
+    case _           => "n/a"
+  }
 
   private case class SharedEntry(
     defn: LiveResourceDef[Any],
@@ -120,16 +132,36 @@ class LiveResourceManager(
       case ShareMode.Exclusive =>
         acquireExclusive[T](entry, resourceName, consumerTestName, resolveDep)
       case ShareMode.SharedReadOnly =>
-        acquireShared[T](entry, resolveDep, resetOnReuse = false)
+        acquireSharedTraced[T](entry, resourceName, consumerTestName, resolveDep, resetOnReuse = false)
       case ShareMode.SharedSerialized =>
         // Serialize access; no reset between consumers.
         entry.instanceLock.lock()
-        acquireShared[T](entry, resolveDep, resetOnReuse = false)
+        acquireSharedTraced[T](entry, resourceName, consumerTestName, resolveDep, resetOnReuse = false)
       case ShareMode.SharedWithReset(_) =>
         // Serialize access; reset between consumers.
         entry.instanceLock.lock()
-        acquireShared[T](entry, resolveDep, resetOnReuse = true)
+        acquireSharedTraced[T](entry, resourceName, consumerTestName, resolveDep, resetOnReuse = true)
     }
+  }
+
+  /** Wrapper: acquireShared + emit a TaskAcquire trace. Centralizes the
+    * acquire-time refcount snapshot so the trace reflects post-acquire
+    * state. */
+  private def acquireSharedTraced[T](
+    entry: SharedEntry,
+    resourceName: String,
+    consumerTestName: String,
+    resolveDep: Dep[?] => Any,
+    resetOnReuse: Boolean
+  ): T = {
+    val v = acquireShared[T](entry, resolveDep, resetOnReuse)
+    val (instId, rc) = tableLock.synchronized {
+      (entry.instance.map(instanceId).getOrElse("n/a"), entry.refCount)
+    }
+    trace.emit(TraceEvent.TaskAcquire(
+      Instant.now(), TaskTrace.currentThread(),
+      resourceName, consumerTestName, instId, rc))
+    v
   }
 
 
@@ -151,6 +183,12 @@ class LiveResourceManager(
   ): Unit = {
     val entryOpt = tableLock.synchronized(entries.get(resourceName))
     entryOpt.foreach { entry =>
+      // Emit release first so the refcount value reflects state seen
+      // by the caller, not post-decrement.
+      val rcBefore = tableLock.synchronized(entry.refCount)
+      trace.emit(TraceEvent.TaskRelease(
+        Instant.now(), TaskTrace.currentThread(),
+        resourceName, consumerTestName, failed, rcBefore))
       entry.defn.shareMode match {
         case ShareMode.Exclusive =>
           releaseExclusive(resourceName, consumerTestName)
@@ -207,6 +245,36 @@ class LiveResourceManager(
   /** Look up a registered definition by qualified name. */
   def lookup(resourceName: String): Option[LiveResourceDef[Any]] = tableLock.synchronized {
     entries.get(resourceName).map(_.defn)
+  }
+
+  /** All test producers that must complete before a consumer with the
+    * given immediate `dependencies` can safely acquire its declared
+    * live-resource deps. Walks every registered live resource reachable
+    * from `directDepNames` (recursing through nested `ResourceDep`s) and
+    * collects the names of every `TestDep` encountered.
+    *
+    * Used by the parallel scheduler to expand its readiness predicate
+    * past the immediate-dep horizon: a consumer test that depends on a
+    * live resource cannot become ready until every test that the
+    * resource transitively reads has completed. Without this, the
+    * scheduler treats the live-resource name as a "not in testMap, must
+    * be a resource, materialized on demand" leaf and dispatches the
+    * consumer concurrently with its true producer (Issue 1 in
+    * `.ai/plan/task-graph.md`). */
+  def transitiveTestProducers(directDepNames: Iterable[String]): Set[String] = {
+    val seenResources = mutable.Set[String]()
+    val tests = mutable.Set[String]()
+    def walk(name: String): Unit = {
+      if (!isRegistered(name) || seenResources.contains(name)) return
+      seenResources += name
+      lookup(name).foreach(_.deps.foreach {
+        case ResourceDep(ref) => walk(ref.name)
+        case TestDep(ref)     => tests += ref.name
+        case _                => ()
+      })
+    }
+    directDepNames.foreach(walk)
+    tests.toSet
   }
 
   /** Transitive set of registered live resources reachable from the given
@@ -278,6 +346,9 @@ class LiveResourceManager(
               totalBuildMs = entry.stats.totalBuildMs + dt)
           }
           listener.onBuild(entry.defn.name, dt)
+          trace.emit(TraceEvent.TaskRun(
+            Instant.now(), TaskTrace.currentThread(),
+            entry.defn.name, instanceId(built), dt))
         }
       } finally entry.buildLock.unlock()
     }
@@ -301,6 +372,11 @@ class LiveResourceManager(
           entry.stats = entry.stats.copy(resets = entry.stats.resets + 1)
         }
         listener.onReset(entry.defn.name, dt)
+        trace.emit(TraceEvent.TaskReset(
+          Instant.now(), TaskTrace.currentThread(),
+          entry.defn.name,
+          tableLock.synchronized(entry.instance.map(instanceId).getOrElse("n/a")),
+          dt, ok))
         // Reset failure → invalidate the instance for the next consumer.
         if (!ok) {
           val toClose = tableLock.synchronized {
@@ -346,6 +422,7 @@ class LiveResourceManager(
 
   private def closeSharedInstance(entry: SharedEntry): Unit = {
     val instOpt = tableLock.synchronized(entry.instance)
+    val instId = instOpt.map(instanceId).getOrElse("n/a")
     val t0 = System.currentTimeMillis()
     instOpt.foreach { i =>
       try i match {
@@ -371,6 +448,9 @@ class LiveResourceManager(
     val _ = aliveMs
     allocs.foreach { a => try a.release() catch { case _: Exception => () } }
     listener.onClose(entry.defn.name, dt)
+    trace.emit(TraceEvent.TaskClose(
+      Instant.now(), TaskTrace.currentThread(),
+      entry.defn.name, instId, dt))
   }
 
   // ----------------------- exclusive -----------------------
@@ -392,6 +472,13 @@ class LiveResourceManager(
         totalBuildMs = entry.stats.totalBuildMs + dt)
     }
     listener.onBuild(resourceName, dt)
+    val instId = instanceId(built)
+    trace.emit(TraceEvent.TaskRun(
+      Instant.now(), TaskTrace.currentThread(),
+      resourceName, instId, dt))
+    trace.emit(TraceEvent.TaskAcquire(
+      Instant.now(), TaskTrace.currentThread(),
+      resourceName, consumerTestName, instId, /*refcount*/ 1))
     built.asInstanceOf[T]
   }
 
@@ -403,6 +490,7 @@ class LiveResourceManager(
 
   private def closeExclusiveHolding(resourceName: String, h: ExclusiveHolding): Unit = {
     val t0 = System.currentTimeMillis()
+    val instId = instanceId(h.instance)
     try h.instance match {
       case c: AutoCloseable => c.close()
       case _ => ()
@@ -419,6 +507,9 @@ class LiveResourceManager(
       }
     }
     listener.onClose(resourceName, dt)
+    trace.emit(TraceEvent.TaskClose(
+      Instant.now(), TaskTrace.currentThread(),
+      resourceName, instId, dt))
   }
 
   // ----------------------- common build -----------------------

@@ -32,8 +32,14 @@ jobs:
       - name: Run booktest (parallel)
         run: sbt ++3.3.1 "Test/runMain booktest.BooktestMain -p4 examples"
 
-      - name: Run meta tests
+      - name: Run meta tests (sequential)
         run: sbt ++3.3.1 "Test/runMain booktest.BooktestMain test"
+
+      # Run meta tests under -p4 too — that's the path that exercises the
+      # cross-thread DependencyCache / snapshot-manager invariants. Failures
+      # only seen here usually mean a race in the framework itself.
+      - name: Run meta tests (parallel)
+        run: sbt ++3.3.1 "Test/runMain booktest.BooktestMain -p4 test"
 
   cross-compile:
     runs-on: ubuntu-latest

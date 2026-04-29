@@ -22,12 +22,12 @@ class ResourceManager(portPool: PortPool = new PortPool()) {
   def locks: LockPool = lockPool
 
   /** Register a custom resource pool */
-  def register[T](name: String, pool: ResourcePool[T]): Unit = {
+  def register[T](name: String, pool: ResourcePool[T]): Unit = synchronized {
     resources(name) = pool.asInstanceOf[ResourcePool[Any]]
   }
 
   /** Get a registered resource pool */
-  def pool[T](name: String): Option[ResourcePool[T]] = {
+  def pool[T](name: String): Option[ResourcePool[T]] = synchronized {
     resources.get(name).map(_.asInstanceOf[ResourcePool[T]])
   }
 
@@ -62,7 +62,8 @@ class ResourceManager(portPool: PortPool = new PortPool()) {
   /** Release all resources */
   def releaseAll(): Unit = {
     portPool.releaseAll()
-    resources.values.foreach(_.releaseAll())
+    val pools = synchronized(resources.values.toList)
+    pools.foreach(_.releaseAll())
   }
 }
 
@@ -314,7 +315,8 @@ class LockPool extends ResourcePool[String] {
 
   /** Release a named lock */
   override def release(name: String): Unit = {
-    locks.get(name).foreach(_.release())
+    val sem = poolLock.synchronized(locks.get(name))
+    sem.foreach(_.release())
   }
 
   /** Try to acquire a lock without blocking */

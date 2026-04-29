@@ -25,7 +25,12 @@ case class RunConfig(
   threads: Int = 1,  // -p N: number of threads for parallel execution
   output: java.io.PrintStream = System.out,  // Output stream (redirect for meta tests)
   booktestConfig: BooktestConfig = BooktestConfig.empty,  // test-root and groups config
-  invalidateLiveOnFail: Boolean = false  // --invalidate-live-on-fail
+  invalidateLiveOnFail: Boolean = false,  // --invalidate-live-on-fail
+  // --trace / BOOKTEST_TRACE=1: also write the structured event log to
+  // <outputDir>/.booktest.log. The runner always keeps a bounded
+  // in-memory ring buffer (used to attach a "Trace context" block to
+  // failure reports) regardless of this flag.
+  trace: Boolean = sys.env.contains("BOOKTEST_TRACE")
 ) {
   /** Get the test path for a suite, applying test-root stripping */
   def getSuitePath(suiteName: String): String = {
@@ -81,13 +86,36 @@ object TestRunner {
       unwrapInvocationTarget(ite.getCause)
     case _ => t
   }
+
+  /** Format an exception with full stack trace (and chained causes) so
+    * race-condition–style failures are diagnosable from logs/CI output. */
+  private[booktest] def formatStackTrace(t: Throwable): String = {
+    val sw = new java.io.StringWriter()
+    t.printStackTrace(new java.io.PrintWriter(sw))
+    sw.toString
+  }
 }
 
 class TestRunner(config: RunConfig = RunConfig()) {
   private val dependencyCache = new DependencyCache()
   private val resourceManager = ResourceManager.fromEnv()
+  /** Always-on bounded ring buffer of trace events; used to attach a
+    * "Trace context" block to failure reports without requiring the
+    * user to opt in to tracing first. */
+  private val ringBuffer = new RingBufferSink()
+  /** Optional extra logfile sink, opened lazily on first emit. */
+  private val logfile: Option[LogfileSink] =
+    if (config.trace) Some(new LogfileSink(config.outputDir / ".booktest.log"))
+    else None
+  /** The trace bus the runner and the live-resource manager both write
+    * to. */
+  private val trace: TaskTrace =
+    logfile match {
+      case Some(lf) => new BroadcastTrace(ringBuffer, lf)
+      case None     => ringBuffer
+    }
   private val liveResources = {
-    val mgr = new LiveResourceManager()
+    val mgr = new LiveResourceManager(trace = trace)
     if (config.verbose) {
       mgr.listener = new LiveResourceListener {
         override def onBuild(name: String, durationMs: Long): Unit =
@@ -101,16 +129,43 @@ class TestRunner(config: RunConfig = RunConfig()) {
     mgr
   }
   @volatile private var interactiveQuit = false
+  /** Qualified test names ("<suitePath>/<testName>") that are scheduled
+    * to run in the current `runMultipleSuites` invocation. Populated by
+    * the pre-pass; consulted by `loadDependencyValue` so the disk
+    * `.bin` fallback never preempts a producer that's about to run.
+    *
+    * Issue 1 Fix B from `.ai/plan/task-graph.md`: even with the
+    * scheduler's producer-aware readiness predicate (Fix A), the cache
+    * is the second line of defense. If a producer is in this run, only
+    * the in-memory cache (which is populated when the producer
+    * completes) may answer for it; disk `.bin` reflects a *prior*
+    * invocation and would silently serve stale data. */
+  @volatile private var scheduledInThisRun: Set[String] = Set.empty
   private val out = config.output
 
   /** Get the resource manager for tests that need ports/resources */
   def resources: ResourceManager = resourceManager
+
+  /** Inspect the trace events recorded so far. Intended for meta-tests
+    * that want to assert on lifecycle ordering / dep resolution
+    * sources; the production runner attaches a trace block to failing
+    * results automatically and doesn't need callers to query this. */
+  def traceBuffer: RingBufferSink = ringBuffer
   
   /** Run a single suite (without continue mode filtering).
     * For continue mode support, use runMultipleSuites instead.
     */
   def runSuite(suite: TestSuite): RunResult = {
-    // Delegate to runSuiteWithFilter with empty todoSet (run all tests)
+    // Mirror the runMultipleSuites pre-pass for the single-suite path,
+    // so live resources are registered and the cache run-set
+    // (Issue 1 Fix B) reflects exactly what's about to run.
+    suite.liveResources.foreach(liveResources.register)
+    val suitePath = config.getSuitePath(suite.fullClassName)
+    val tests = config.testFilter match {
+      case Some(pattern) => suite.testCases.filter(_.name.contains(pattern))
+      case None => suite.testCases
+    }
+    scheduledInThisRun = tests.map(tc => s"$suitePath/${tc.name}").toSet
     runSuiteWithFilter(suite, Set.empty)
   }
   
@@ -169,7 +224,10 @@ class TestRunner(config: RunConfig = RunConfig()) {
       // Call setup hook
       if (suite != null) {
         try { suite.getSetup(testRun) }
-        catch { case e: Exception => testRun.iln(s"Setup failed: ${e.getMessage}") }
+        catch { case e: Exception =>
+          testRun.iln(s"Setup failed: ${e.getMessage}")
+          testRun.iln(TestRunner.formatStackTrace(e))
+        }
       }
 
       val returnValue = try {
@@ -178,7 +236,10 @@ class TestRunner(config: RunConfig = RunConfig()) {
         // Call teardown hook (always, even if test fails)
         if (suite != null) {
           try { suite.getTeardown(testRun) }
-          catch { case e: Exception => testRun.iln(s"Teardown failed: ${e.getMessage}") }
+          catch { case e: Exception =>
+            testRun.iln(s"Teardown failed: ${e.getMessage}")
+            testRun.iln(TestRunner.formatStackTrace(e))
+          }
         }
       }
 
@@ -305,9 +366,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
         testRun.iln()
         testRun.fail()
         testRun.iln(s"test raised exception ${e.getClass.getName}: ${e.getMessage}")
-        val sw = new java.io.StringWriter()
-        e.printStackTrace(new java.io.PrintWriter(sw))
-        testRun.iln(sw.toString)
+        testRun.iln(TestRunner.formatStackTrace(e))
 
         // Finalize output on error
         testRun.end()
@@ -393,6 +452,11 @@ class TestRunner(config: RunConfig = RunConfig()) {
     // Apply continue mode logic
     val (doneCaseReports, todoTestNames) = oldReports.casesToDoneAndTodo(allSelectedTestNames, config.continueMode)
     val todoSet = todoTestNames.toSet
+
+    // Issue 1 Fix B: tell the cache which tests are scheduled in this
+    // invocation, so its disk `.bin` fallback can defer to the in-memory
+    // cache for producers that are about to run.
+    scheduledInThisRun = todoSet
 
     // Track results from skipped tests (continue mode)
     val skippedResults = if (config.continueMode && doneCaseReports.nonEmpty) {
@@ -646,6 +710,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
     } catch {
       case e: Exception =>
         out.println(s"Warning: beforeAll failed for $suiteName: ${e.getMessage}")
+        out.println(TestRunner.formatStackTrace(e))
     }
 
     val results = try {
@@ -662,6 +727,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       } catch {
         case e: Exception =>
           out.println(s"Warning: afterAll failed for $suiteName: ${e.getMessage}")
+          out.println(TestRunner.formatStackTrace(e))
       }
     }
 
@@ -949,9 +1015,21 @@ class TestRunner(config: RunConfig = RunConfig()) {
             if (suiteHasLocks && inProgress.nonEmpty) Nil
             else {
               val readyUnranked = testCases.filter { tc =>
-                !completed.contains(tc.name) &&
-                !inProgress.contains(tc.name) &&
-                tc.dependencies.forall(dep => completed.contains(dep) || !testMap.contains(dep))
+                if (completed.contains(tc.name) || inProgress.contains(tc.name)) false
+                else {
+                  // A test is ready when every test producer it depends
+                  // on (directly or transitively through a live
+                  // resource's TestDep closure) has completed. Live
+                  // resources themselves don't appear in `testMap`;
+                  // their producer tests do, and those are what
+                  // constrain readiness. See `.ai/plan/task-graph.md`
+                  // Issue 1.
+                  val directTestDeps = tc.dependencies.filter(testMap.contains)
+                  val resourceTestDeps =
+                    liveResources.transitiveTestProducers(tc.dependencies)
+                  val producers = directTestDeps.toSet ++ resourceTestDeps
+                  producers.forall(completed.contains)
+                }
               }
               val ranked = readyUnranked.zipWithIndex
                 .sortBy { case (tc, idx) => (-localityScore(tc), idx) }
@@ -970,6 +1048,16 @@ class TestRunner(config: RunConfig = RunConfig()) {
                 inProgress += testCase.name
               }
 
+              // Trace: scheduler decided this test is ready. Producers
+              // is the producer-aware set the readiness predicate
+              // computed (Issue 1 Fix A).
+              val producers = (testCase.dependencies.filter(testMap.contains).toSet ++
+                liveResources.transitiveTestProducers(testCase.dependencies)).toList
+              val suitePathForTrace = config.getSuitePath(suiteName)
+              trace.emit(TraceEvent.SchedReady(
+                java.time.Instant.now(), TaskTrace.currentThread(),
+                s"$suitePathForTrace/${testCase.name}", producers))
+
               // Send "starting" message to main thread
               reportQueue.put(TestReportMessage.Starting(testCase.name, suiteName))
 
@@ -981,11 +1069,16 @@ class TestRunner(config: RunConfig = RunConfig()) {
                 } catch {
                   case NonFatal(rawErr) =>
                     val e = TestRunner.unwrapInvocationTarget(rawErr)
+                    // Include the full stack trace — this path catches
+                    // booktest-internal failures (e.g. dependency-resolution
+                    // races); a one-line message hides the call site.
                     val errorResult = TestResult(
                       testName = s"${config.getSuitePath(suiteName)}/${testCase.name}",
                       passed = false,
                       output = "",
-                      diff = Some(s"Test '${testCase.name}' failed with exception: ${e.getMessage}"),
+                      diff = Some(
+                        s"Test '${testCase.name}' failed with exception: ${e.getMessage}\n" +
+                        TestRunner.formatStackTrace(e)),
                       durationMs = 0
                     )
                     reportQueue.put(TestReportMessage.Completed(testCase.name, errorResult))
@@ -1130,12 +1223,16 @@ class TestRunner(config: RunConfig = RunConfig()) {
     logCapture.start()
 
     var consumerFailed = false
+    var finalResult: Option[TestResult] = None
 
     try {
       // Setup
       if (suite != null) {
         try { suite.getSetup(testRun) }
-        catch { case e: Exception => testRun.iln(s"Setup failed: ${e.getMessage}") }
+        catch { case e: Exception =>
+          testRun.iln(s"Setup failed: ${e.getMessage}")
+          testRun.iln(TestRunner.formatStackTrace(e))
+        }
       }
 
       val returnValue = try {
@@ -1143,7 +1240,10 @@ class TestRunner(config: RunConfig = RunConfig()) {
       } finally {
         if (suite != null) {
           try { suite.getTeardown(testRun) }
-          catch { case e: Exception => testRun.iln(s"Teardown failed: ${e.getMessage}") }
+          catch { case e: Exception =>
+            testRun.iln(s"Teardown failed: ${e.getMessage}")
+            testRun.iln(TestRunner.formatStackTrace(e))
+          }
         }
       }
 
@@ -1186,26 +1286,54 @@ class TestRunner(config: RunConfig = RunConfig()) {
       }
 
       // Store testRun reference for snapshot updates
-      result.copy(testRun = Some(testRun))
+      val finalised = attachTraceBlock(
+        result.copy(testRun = Some(testRun)),
+        testCase.dependencies)
+      finalResult = Some(finalised)
+      finalised
 
     } catch {
       case NonFatal(rawErr) =>
         val e = TestRunner.unwrapInvocationTarget(rawErr)
         consumerFailed = true
+        // Match the sequential-mode catch: write the full stack trace into
+        // the test's .md output so it ends up in the snapshot diff and in
+        // the .txt diff report. Without this, parallel-mode failures (the
+        // path most likely to surface races) lose the call site.
+        testRun.iln()
+        testRun.fail()
+        testRun.iln(s"test raised exception ${e.getClass.getName}: ${e.getMessage}")
+        testRun.iln(TestRunner.formatStackTrace(e))
         testRun.end()
         logCapture.stop()
         val endTime = System.currentTimeMillis()
         val duration = endTime - startTime
         testRun.writeReport(s"Test '${testCase.name}' FAILED: ${e.getMessage}\nDuration: ${duration}ms")
 
-        TestResult(
-          testName = fullTestName,
-          passed = false,
-          output = "",
-          diff = Some(s"Test '${testCase.name}' failed with exception: ${e.getMessage}"),
-          durationMs = duration
-        )
+        val errResult = attachTraceBlock(
+          TestResult(
+            testName = fullTestName,
+            passed = false,
+            output = "",
+            diff = Some(
+              s"Test '${testCase.name}' failed with exception: ${e.getMessage}\n" +
+              TestRunner.formatStackTrace(e)),
+            durationMs = duration),
+          testCase.dependencies)
+        finalResult = Some(errResult)
+        errResult
     } finally {
+      // Trace: this test ended. Emit before lock-release so the event
+      // shows up alongside the test's other events in the ring buffer.
+      finalResult.foreach { r =>
+        val resultKind =
+          if (r.passed) "ok"
+          else if (r.successState == SuccessState.FAIL) "fail"
+          else "diff"
+        trace.emit(TraceEvent.TaskEnd(
+          java.time.Instant.now(), TaskTrace.currentThread(),
+          fullTestName, resultKind, r.durationMs))
+      }
       // Release resource locks
       locks.foreach(lock => resourceManager.locks.release(lock))
       // Release every transitively-reserved live resource for this
@@ -1229,6 +1357,54 @@ class TestRunner(config: RunConfig = RunConfig()) {
     }
   }
 
+  /** When a test fails or DIFFs under parallel execution, append a
+    * "Trace context" block to its `diff` field listing the trace events
+    * that touched this test and its transitive resources. This makes
+    * race-class failures (Issue 1, future Issue Ns) diagnosable from
+    * the end-of-run diff alone, with no need to re-run with `--trace`
+    * or eyeball thread IDs.
+    *
+    * The block is opt-out for sequential mode (no concurrency = no
+    * race-class confusion that the trace would clarify) but always
+    * attached at `-pN ≥ 2`.
+    *
+    * Events are pulled from the always-on `ringBuffer` for: the test
+    * itself, every live resource it transitively reaches, and every
+    * test producer in that resource closure. Sorted by timestamp so
+    * the reader sees the chronological order across worker threads. */
+  private def attachTraceBlock(r: TestResult, deps: Iterable[String]): TestResult = {
+    if (r.passed || config.threads <= 1) return r
+    val resources = liveResources.transitiveResourceClosure(deps)
+    val producers = liveResources.transitiveTestProducers(deps)
+    val producerKeys = producers.map { p =>
+      // testProducers returns short names; qualify with same suitePath
+      // as the consumer (producers must live in the same suite for
+      // booktest's current dep model).
+      val slash = r.testName.lastIndexOf('/')
+      if (slash > 0) s"${r.testName.substring(0, slash)}/$p" else p
+    }
+    val keys = (Set(r.testName) ++ resources ++ producerKeys).toList
+    val events = ringBuffer.snapshotMany(keys)
+    if (events.isEmpty) return r
+    val block = formatTraceBlock(r.testName, events)
+    val newDiff = r.diff match {
+      case Some(d) => Some(d + "\n\n" + block)
+      case None    => Some(block)
+    }
+    r.copy(diff = newDiff)
+  }
+
+  private def formatTraceBlock(forTask: String, events: List[TraceEvent]): String = {
+    val sb = new StringBuilder
+    sb.append(s"Trace context for $forTask (last ${events.size} events):\n")
+    sb.append("-" * 60).append('\n')
+    events.foreach { e =>
+      sb.append("  ").append(TraceEvent.render(e)).append('\n')
+    }
+    sb.append("-" * 60)
+    sb.toString
+  }
+
   /** Print verbose output from a test result */
   private def printVerboseResultOutput(result: TestResult): Unit = {
     result.testRun.foreach { testRun =>
@@ -1243,29 +1419,60 @@ class TestRunner(config: RunConfig = RunConfig()) {
   }
 
   /** Load a dependency value from memory cache or bin file.
+    *
+    * Cache lookup precedence:
+    *   1. In-memory cache (populated by every successful test in this
+    *      run).
+    *   2. On-disk `.bin` from a *prior* invocation — but only when the
+    *      dep is **not** scheduled to run in the current invocation.
+    *      If the dep is scheduled, returning the on-disk value would
+    *      preempt the producer that's about to run with state from the
+    *      previous invocation; the caller should wait (or auto-run)
+    *      instead. This is Issue 1 Fix B from
+    *      `.ai/plan/task-graph.md`.
+    *
     * @param depName short dependency name (e.g., "createData")
     * @param suitePath suite path prefix (e.g., "examples/MethodRefTests")
     * @param testRun test run for bin file fallback
     */
   private def loadDependencyValue(depName: String, suitePath: String, testRun: TestCaseRun): Option[Any] = {
     val qualifiedKey = s"$suitePath/$depName"
-    // Try memory cache first (qualified key)
-    dependencyCache.get[Any](qualifiedKey).orElse {
-      // Fall back to loading from the dependency's bin file (same suite directory)
-      val depBinFile = testRun.outDir / s"$depName.bin"
-      if (os.exists(depBinFile)) {
-        try {
-          val serialized = os.read(depBinFile)
-          val result = testRun.deserializeCacheValue(serialized)
-          // Cache in memory for subsequent lookups
-          dependencyCache.put(qualifiedKey, result)
-          Some(result)
-        } catch {
-          case _: Exception => None
+    val consumer = s"$suitePath/${testRun.testName}"
+    def emit(source: String, value: String): Unit =
+      trace.emit(TraceEvent.DepResolve(
+        java.time.Instant.now(), TaskTrace.currentThread(),
+        consumer, qualifiedKey, source, value))
+
+    dependencyCache.get[Any](qualifiedKey) match {
+      case Some(v) =>
+        emit("memory", String.valueOf(v))
+        Some(v)
+      case None =>
+        if (scheduledInThisRun.contains(qualifiedKey)) {
+          // Producer is scheduled in this run; refuse to serve a stale
+          // value from disk. Caller will either find the producer
+          // already completed on a retry, or auto-run it inline.
+          emit("miss-pending", "")
+          None
+        } else {
+          val depBinFile = testRun.outDir / s"$depName.bin"
+          if (os.exists(depBinFile)) {
+            try {
+              val serialized = os.read(depBinFile)
+              val result = testRun.deserializeCacheValue(serialized)
+              dependencyCache.put(qualifiedKey, result)
+              emit("bin", String.valueOf(result))
+              Some(result)
+            } catch {
+              case _: Exception =>
+                emit("bin-error", "")
+                None
+            }
+          } else {
+            emit("miss", "")
+            None
+          }
         }
-      } else {
-        None
-      }
     }
   }
 
