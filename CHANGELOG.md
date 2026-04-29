@@ -1,6 +1,138 @@
 # Changelog
 
-## Unreleased
+## 0.4.2 (2026-04-29)
+
+### Fix Issue 1: live-resource consumers could outrun their transitive TestRef producers under -pN
+
+The parallel scheduler's readiness predicate (`runTestsParallel`)
+only walked a test's *immediate* `tc.dependencies` strings, treating
+any name that wasn't in `testMap` as "must be a live resource,
+materialized on demand" — and dispatching the consumer as ready
+without waiting for the producer tests that the live resource
+transitively reads. Combined with the disk `.bin` fallback in
+`loadDependencyValue`, this let the consumer's resource build
+closure resolve the producer from a *prior* invocation's `.bin`
+while the in-run producer concurrently called `clearTmpDir()` and
+recreated its state. The Aito Core integration project hit this as
+sporadic `NoSuchObjectException: invoices not found` at `-p2`. See
+the full anatomy in `.ai/plan/task-graph.md` (Issue 1).
+
+Two complementary fixes, both shipped:
+
+- **Fix A — producer-aware readiness predicate.** New
+  `LiveResourceManager.transitiveTestProducers(deps)` walks every
+  registered live resource reachable from the consumer's
+  `tc.dependencies`, recursing through nested `ResourceDep`s, and
+  returns the names of every `TestDep` encountered. The parallel
+  scheduler now waits for that producer set to complete before
+  considering a test ready, in addition to the immediate-deps set.
+- **Fix B — cache run-set awareness.** `loadDependencyValue` now
+  consults a `scheduledInThisRun: Set[String]` populated by the
+  pre-pass and refuses to fall back to disk `.bin` when the
+  requested dep is scheduled to run in this invocation. The
+  in-memory cache (which Fix A guarantees is populated by the time
+  the consumer reads) is the only valid source for in-run
+  producers; disk reflects a prior invocation. `--continue` and
+  cross-invocation use cases keep their disk fallback.
+
+New meta test `LiveResourceProducerOrderingTest` reproduces Issue 1
+deterministically — a producer with a 500ms sleep, a unique-per-run
+path, and a stale `.bin` from the prior run — and asserts the
+consumer always sees the in-run producer's path under `-p2`.
+
+### Fix Issue 2: failure logs now surface dep-resolution and live-resource lifecycle
+
+Race-class failures previously surfaced as a `NoSuchObjectException`
+or `None.get` deep in user code, with no signal pointing at the
+booktest-internal cause. Diagnosing took eyeball-on-thread-IDs
+work. Booktest had every piece of information needed; it just
+didn't print it.
+
+This release adds a structured event bus and an always-on bounded
+ring buffer that captures lifecycle events from the runner and the
+live-resource manager. Events: `SchedReady`, `DepResolve` (with
+`source` ∈ memory / bin / miss / miss-pending / bin-error), `TaskRun`
+(producer or live-resource build), `TaskAcquire`, `TaskRelease`,
+`TaskReset`, `TaskClose`, `TaskEnd`. Every live-resource event
+carries an identity hash (hex of `System.identityHashCode`) so the
+trace disambiguates "same handle as the previous event" from
+"different handle."
+
+When a test fails or DIFFs at `-pN ≥ 2`, the runner automatically
+appends a "Trace context for ..." block to the result's `diff`,
+populated from the ring buffer for that test plus its transitive
+resources and producers. CI artifact viewers and end-of-run diff
+sections see the full chronological event stream without re-running
+with `--trace`.
+
+Opt-in extras:
+
+- `--trace` / `BOOKTEST_TRACE=1` writes the same events to
+  `<output-dir>/.booktest.log` as a thread-tagged human-readable
+  log, ready for grep.
+
+New meta test `TaskTraceTest` verifies the event stream and the
+auto-attached failure block.
+
+### Public API additions
+
+- `class TraceEvent` ADT (`SchedReady`, `DepResolve`, `TaskRun`,
+  `TaskAcquire`, `TaskRelease`, `TaskReset`, `TaskClose`, `TaskEnd`).
+- `trait TaskTrace` with `def emit(e: TraceEvent): Unit`.
+- `class RingBufferSink`, `class LogfileSink`, `class BroadcastTrace`.
+- `LiveResourceManager.transitiveTestProducers(deps)`.
+- `TestRunner.traceBuffer: RingBufferSink` (for meta-tests).
+- `RunConfig.trace: Boolean` (CLI: `--trace`; env:
+  `BOOKTEST_TRACE`).
+
+This is Phase 1 of the unified Task Graph plan
+(`.ai/plan/task-graph.md`). Phase 2 will collapse the
+test/live-resource execution paths into a single `TaskEngine`; this
+release intentionally keeps the public API and code shape minimal.
+
+### Fix lost-write race in DependencyCache and harden adjacent maps
+
+`DependencyCache.memoryCache` was an unsynchronized `var Map[String, Any]`.
+Under `-pN`, two workers calling `put` concurrently each read the same
+baseline map, appended their own entry, and wrote the result back —
+silently dropping whichever write landed first. Symptoms were
+non-deterministic: `Dependency 'X' failed when auto-run`, missing
+producer values in consumer chains, sporadic `None.get` on cached
+values, and downstream "table not found" / "items not found" failures
+in resource-heavy suites.
+
+Fixed: every `DependencyCache` read and write now goes through a
+`synchronized` block, with double-checked publication on `getOrLoad`
+so a slow `.bin` read doesn't stall the cache.
+
+Same defensive shape applied to the per-test snapshot managers that
+held unsynchronized `var` maps — `EnvSnapshotManager`,
+`EnvMockManager`, `FunctionSnapshotManager`, `FunctionMocker`,
+`HttpSnapshotManager` — and to `ResourceManager.register` / `pool` /
+`releaseAll` and `LockPool.release`. None of these is normally hit
+by multiple threads in routine use, but they shared the same
+"copy-on-write a `var Map` without a lock" pattern that was the bug
+above.
+
+New meta test `DependencyCacheConcurrencyTest` stress-tests the cache
+from 16 writers + 8 readers and asserts no put is lost or corrupted.
+
+### Full stack traces for booktest-internal failures
+
+Race conditions and other framework-internal errors previously
+surfaced as one-line `${e.getMessage}` summaries from the parallel
+worker, the setup/teardown hooks, and `beforeAll` / `afterAll`. The
+call site was lost. Every catch path in `TestRunner` now prints the
+full stack trace (via `formatStackTrace`) into the test's `.md`
+output and `.txt` diff report, so failures only seen under `-pN` are
+diagnosable from CI artifacts.
+
+### CI runs meta tests under -p4
+
+The workflow already ran examples both sequentially and under `-p4`,
+but meta tests only ran sequentially. Added a parallel meta-test step
+so race regressions in the framework are caught at PR time, not in a
+downstream consumer.
 
 ### `<test>.txt` matches Python booktest
 

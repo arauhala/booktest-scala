@@ -497,7 +497,19 @@ For coding agents and contributors choosing where to look:
 - **`llms.txt`** — same surface as USAGE.md but compressed for AI skimming. Keep in sync when API changes.
 - **`CLAUDE.md`** (this file) — codebase architecture, TDD workflow, Live Resources section. For people *working on* booktest.
 - **`CHANGELOG.md`** — release history.
-- **`.ai/plan/`** — design documents (current: live-resources).
+- **`.ai/plan/`** — design documents.
+  - `live-resources.md` — current live-resource API design (shipped).
+  - `task-graph.md` — proposed unified **Task Graph**: tests, live
+    resources, pools, capacities, and future artifact / composite
+    kinds as a single typed DAG, where the difference between a test
+    and a live resource is a *policy bundle* (sharing / caching /
+    production / failure mode) attached to the same `Task`
+    abstraction, not a separate kind of node with a separate walker.
+    Anchors in two concrete bugs from the Aito Core `-pN` integration
+    (live-resource consumers outrunning their transitive `TaskRef`
+    producers; failure logs not surfacing dep-resolution events).
+    Read this before changing the `runTestsParallel` scheduler, the
+    `loadDependencyValue` cache fallback, or `LiveResourceListener`.
 - **`booktest.ini`** — project test config (root, default group, exclude patterns).
 
 When changing public API: update `USAGE.md`, `llms.txt`, `README.md` (if it's a top-billed feature), and `CHANGELOG.md` in the same PR.

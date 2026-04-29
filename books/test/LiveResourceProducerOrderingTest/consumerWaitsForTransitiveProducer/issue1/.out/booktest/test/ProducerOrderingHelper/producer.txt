@@ -1,0 +1,3 @@
+  producer wrote marker (uuid len 36)
+
+Test 'producer' completed in 501ms

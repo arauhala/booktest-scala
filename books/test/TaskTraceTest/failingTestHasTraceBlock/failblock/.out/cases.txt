@@ -1,0 +1,2 @@
+booktest/test/TraceFailHelper/state	DIFF	0
+booktest/test/TraceFailHelper/consumer	FAIL	1
