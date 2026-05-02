@@ -201,7 +201,8 @@ design and a worked example.
 | `-i, --interactive` | Interactive mode for snapshot updates |
 | `-l, --list` | List test cases |
 | `-L, --logs` | Show test logs |
-| `-t PATTERN` | Filter tests by name pattern |
+| `-t PATTERN` | Filter tests by name pattern (cached transitive deps load from `.bin` and are not re-run) |
+| `-r, --refresh-deps` | Force re-run of transitive dependencies (default: load cached deps from `.bin`) |
 | `-w, --review` | Review mode (show diffs without running) |
 | `-S, --recapture` | Force regenerate all snapshots |
 | `-s, --update` | Auto-accept all snapshot changes (DIFF and FAIL) |

@@ -22,6 +22,7 @@ case class RunConfig(
   updateSnapshots: Boolean = false,  // -s: auto-accept snapshot changes
   autoAcceptDiff: Boolean = false,  // -a: auto-accept DIFF tests (not FAIL)
   continueMode: Boolean = false,  // -c: continue from last run, skip successful tests
+  refreshDeps: Boolean = false,  // -r: force re-run of transitive dependencies (default: load from .bin if present)
   threads: Int = 1,  // -p N: number of threads for parallel execution
   output: java.io.PrintStream = System.out,  // Output stream (redirect for meta tests)
   booktestConfig: BooktestConfig = BooktestConfig.empty,  // test-root and groups config
@@ -151,7 +152,53 @@ class TestRunner(config: RunConfig = RunConfig()) {
     * sources; the production runner attaches a trace block to failing
     * results automatically and doesn't need callers to query this. */
   def traceBuffer: RingBufferSink = ringBuffer
-  
+
+  /** Expand the user's filter selection to include only those transitive
+    * dependencies that actually need to run.
+    *
+    * Mirrors Python booktest's `Tests.method_dependencies`: a dep is
+    * included only if (a) it is itself selected by the filter, (b)
+    * `--refresh-deps` (-r) is set, or (c) its `.bin` cache file is
+    * missing. Cached deps are loaded at runtime by
+    * `resolveDependencyValue` from `<output-dir>/.out/<suite>/<dep>.bin`,
+    * so re-running them when the matched test only consumes their
+    * cached return value is wasted work.
+    *
+    * Live-resource names (which never have `.bin` files) are skipped so
+    * they don't end up in the test run list — they are managed by
+    * `LiveResourceManager` and reserved separately by the pre-pass.
+    */
+  private def expandSelectionWithMissingDeps(
+    testCases: List[TestCase],
+    suitePath: String,
+    matchedNames: Set[String]
+  ): List[TestCase] = {
+    val testMap = testCases.map(tc => tc.name -> tc).toMap
+    val needed = scala.collection.mutable.LinkedHashSet[String]()
+
+    def hasBin(depName: String): Boolean =
+      os.exists(config.outputDir / ".out" / os.RelPath(suitePath) / s"$depName.bin")
+
+    def shouldRun(depName: String): Boolean =
+      if (matchedNames.contains(depName)) true
+      else if (config.refreshDeps) true
+      else if (liveResources.isRegistered(depName)) false
+      else !hasBin(depName)
+
+    def walk(name: String): Unit = {
+      if (needed.contains(name)) return
+      testMap.get(name).foreach { tc =>
+        tc.dependencies.foreach { dep =>
+          if (shouldRun(dep)) walk(dep)
+        }
+      }
+      needed += name
+    }
+
+    matchedNames.foreach(walk)
+    testCases.filter(tc => needed.contains(tc.name))
+  }
+
   /** Run a single suite (without continue mode filtering).
     * For continue mode support, use runMultipleSuites instead.
     */
@@ -161,11 +208,12 @@ class TestRunner(config: RunConfig = RunConfig()) {
     // (Issue 1 Fix B) reflects exactly what's about to run.
     suite.liveResources.foreach(liveResources.register)
     val suitePath = config.getSuitePath(suite.fullClassName)
-    val tests = config.testFilter match {
-      case Some(pattern) => suite.testCases.filter(_.name.contains(pattern))
-      case None => suite.testCases
+    val matched = config.testFilter match {
+      case Some(pattern) => suite.testCases.filter(_.name.contains(pattern)).map(_.name).toSet
+      case None => suite.testCases.map(_.name).toSet
     }
-    scheduledInThisRun = tests.map(tc => s"$suitePath/${tc.name}").toSet
+    val expanded = expandSelectionWithMissingDeps(suite.testCases, suitePath, matched)
+    scheduledInThisRun = expanded.map(tc => s"$suitePath/${tc.name}").toSet
     runSuiteWithFilter(suite, Set.empty)
   }
   
@@ -437,16 +485,21 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val outDir = config.outputDir / ".out"
     val oldReports = CaseReports.fromDir(outDir)
 
-    // Build list of all selected test names (for continue mode calculation)
+    // Build list of all selected test names (for continue mode calculation).
+    // Cache-aware: a transitive dep is only added to the run-list if it is
+    // also matched by the filter, --refresh-deps is set, or its .bin is
+    // missing. Otherwise the dep stays out and `resolveDependencyValue`
+    // will load it from .bin at runtime.
     val allSelectedTestNames = suites.flatMap { suite =>
       val fullClassName = suite.fullClassName
       val suitePath = config.getSuitePath(fullClassName)
       val testCases = suite.testCases
-      val filteredTests = config.testFilter match {
-        case Some(pattern) => testCases.filter(_.name.contains(pattern))
-        case None => testCases
+      val matched = config.testFilter match {
+        case Some(pattern) => testCases.filter(_.name.contains(pattern)).map(_.name).toSet
+        case None => testCases.map(_.name).toSet
       }
-      filteredTests.map(tc => s"$suitePath/${tc.name}")
+      val expanded = expandSelectionWithMissingDeps(testCases, suitePath, matched)
+      expanded.map(tc => s"$suitePath/${tc.name}")
     }
 
     // Apply continue mode logic
@@ -482,13 +535,14 @@ class TestRunner(config: RunConfig = RunConfig()) {
     suites.foreach { suite =>
       val suitePath = config.getSuitePath(suite.fullClassName)
       val testCases = suite.testCases
-      val filtered = config.testFilter match {
-        case Some(pattern) => testCases.filter(_.name.contains(pattern))
-        case None => testCases
+      val matched = config.testFilter match {
+        case Some(pattern) => testCases.filter(_.name.contains(pattern)).map(_.name).toSet
+        case None => testCases.map(_.name).toSet
       }
+      val expanded = expandSelectionWithMissingDeps(testCases, suitePath, matched)
       val selected = if (config.continueMode)
-        filtered.filter(tc => todoSet.contains(s"$suitePath/${tc.name}"))
-      else filtered
+        expanded.filter(tc => todoSet.contains(s"$suitePath/${tc.name}"))
+      else expanded
       selected.foreach { tc =>
         // Reserve transitively: every live resource reachable from this
         // test's direct deps gets +1 on its refcount, so nested
@@ -663,24 +717,15 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val suitePath = config.getSuitePath(fullClassName)
     val testCases = suite.testCases
 
-    // Step 1: Apply name pattern filter, but include transitive dependencies
-    val filteredTests = config.testFilter match {
-      case Some(pattern) =>
-        val matched = testCases.filter(_.name.contains(pattern)).map(_.name).toSet
-        val testMap = testCases.map(tc => tc.name -> tc).toMap
-        val needed = scala.collection.mutable.LinkedHashSet[String]()
-        def collectDeps(name: String): Unit = {
-          if (!needed.contains(name)) {
-            testMap.get(name).foreach { tc =>
-              tc.dependencies.foreach(collectDeps)
-            }
-            needed += name
-          }
-        }
-        matched.foreach(collectDeps)
-        testCases.filter(tc => needed.contains(tc.name))
-      case None => testCases
+    // Step 1: Apply name pattern filter; include only transitive deps that
+    // actually need to run. A dep with a fresh .bin cache is loaded by
+    // `resolveDependencyValue` at runtime instead of being re-executed.
+    // -r / --refresh-deps overrides this and forces every dep to re-run.
+    val matchedNames = config.testFilter match {
+      case Some(pattern) => testCases.filter(_.name.contains(pattern)).map(_.name).toSet
+      case None => testCases.map(_.name).toSet
     }
+    val filteredTests = expandSelectionWithMissingDeps(testCases, suitePath, matchedNames)
 
     // Step 2: Apply continue mode filter (if enabled)
     val testsToRun = if (config.continueMode) {
@@ -717,7 +762,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
       if (config.threads > 1) {
         runTestsParallel(testsToRun, fullClassName, suite)
       } else {
-        val sortedTests = applyLocalityGrouping(resolveDependencyOrder(testsToRun))
+        val sortedTests = applyLocalityGrouping(
+          resolveDependencyOrder(testsToRun, suite.testCases.map(_.name).toSet))
         sortedTests.takeWhile(_ => !interactiveQuit).map(runTestCase(_, fullClassName, suite))
       }
     } finally {
@@ -946,7 +992,10 @@ class TestRunner(config: RunConfig = RunConfig()) {
     }
   }
 
-  private def resolveDependencyOrder(testCases: List[TestCase]): List[TestCase] = {
+  private def resolveDependencyOrder(
+    testCases: List[TestCase],
+    knownTestNames: Set[String] = Set.empty
+  ): List[TestCase] = {
     val testMap = testCases.map(tc => tc.name -> tc).toMap
     val visited = scala.collection.mutable.Set[String]()
     val result = scala.collection.mutable.ListBuffer[TestCase]()
@@ -959,9 +1008,14 @@ class TestRunner(config: RunConfig = RunConfig()) {
             testCase.dependencies.foreach(visit)
             result += testCase
           case None =>
-            // A dep not in the test map is a live resource — materialized
-            // on demand by LiveResourceManager, no ordering constraint.
-            if (!liveResources.isRegistered(testName))
+            // Dep absent from `testMap` is fine when it's a live resource
+            // (materialized by LiveResourceManager) or a test that exists
+            // in the suite but was filtered out of this run because its
+            // .bin cache is fresh (`resolveDependencyValue` will load it
+            // from disk). Throw only for genuinely unknown names.
+            val isLive = liveResources.isRegistered(testName)
+            val isFilteredCachedTest = knownTestNames.contains(testName)
+            if (!isLive && !isFilteredCachedTest)
               throw new IllegalArgumentException(s"Dependency '$testName' not found")
         }
       }

@@ -90,6 +90,7 @@ Run: `sbt 'Test/runMain booktest.BooktestMain my.MyTests'`. First run writes
 - `snapshot[T](name, args*)(compute)` — cache expensive computation, auto-invalidate on arg hash change
 - Test return value is auto-cached to `<test>.bin` for dep injection
 - `hasSnapshot(name, args*)`, `invalidateSnapshot(name)`, `invalidateAllSnapshots()`
+- Build-system semantics: filtered runs (`-t pat`) re-run a transitive dep ONLY if it matches the filter, its `.bin` is missing, or `-r`/`--refresh-deps` is set; otherwise the cached value loads from `.bin` (Python booktest parity)
 
 **Async**:
 - `await(future, timeout)` — await with default infinite timeout
@@ -178,6 +179,7 @@ sbt 'Test/runMain booktest.BooktestMain [flags] [test classes / groups]'
 | `-w, --review` | Re-show diffs from previous run without executing |
 | `-pN` | Parallel execution with N threads (e.g. `-p4`) |
 | `-c, --continue` | Skip tests that passed last run |
+| `-r, --refresh-deps` | Force re-run of transitive deps (default: load cached deps from `.bin`) |
 | `-t PATTERN` | Filter tests by substring (transitive deps still included) |
 | `-S, --recapture` | Force regenerate ALL snapshots |
 | `-s, --update` | Auto-accept snapshot changes (DIFF and FAIL) |

@@ -1,0 +1,3 @@
+  consumed: produced_value
+
+Test 'consumer' completed in 0ms

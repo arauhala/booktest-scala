@@ -274,6 +274,26 @@ class DataTests extends TestSuite {
 }
 ```
 
+#### Dependency caching (build-system semantics)
+
+The producer's return value is persisted to `<output-dir>/.out/<suite>/<test>.bin`
+on every successful (OK or DIFF) run. When you later run only a subset of
+tests with `-t`, booktest behaves like a build system:
+
+- A transitive dep is re-run **only if** it matches the filter, its `.bin`
+  is missing, or `-r` / `--refresh-deps` is set.
+- Otherwise the cached value is loaded from `.bin` at runtime, and the
+  upstream test is not executed.
+
+This matches Python booktest's behavior. To force every dep on the path
+to re-run (e.g., before a benchmark where stale cached state would
+mislead), pass `-r`:
+
+```bash
+sbt "Test/runMain booktest.BooktestMain -t process myproject.DataTests"      # process only; setup loads from .bin
+sbt "Test/runMain booktest.BooktestMain -r -t process myproject.DataTests"   # setup re-runs too
+```
+
 ### Setup and Teardown
 
 ```scala
@@ -661,8 +681,11 @@ sbt "Test/runMain booktest.BooktestMain -p4 myproject.MyTests"
 # Continue mode - only re-run failures
 sbt "Test/runMain booktest.BooktestMain -c myproject.MyTests"
 
-# Filter by name pattern
+# Filter by name pattern (cached transitive deps load from .bin and are not re-run)
 sbt "Test/runMain booktest.BooktestMain -v -t model myproject.MyTests"
+
+# Force re-run of transitive dependencies as well (use before benchmarks)
+sbt "Test/runMain booktest.BooktestMain -v -r -t model myproject.MyTests"
 
 # Interactive mode (accept/reject snapshot changes)
 sbt "Test/runMain booktest.BooktestMain -i myproject.MyTests"
@@ -701,6 +724,7 @@ sbt "Test/runMain booktest.BooktestMain --clean"
 | `-w, --review` | Review mode (show diffs without running) |
 | `-pN` | Parallel execution with N threads |
 | `-c, --continue` | Skip tests that passed in previous run |
+| `-r, --refresh-deps` | Force re-run of transitive dependencies (default: load from `.bin` if present) |
 | `-S, --recapture` | Force regenerate all snapshots |
 | `-s, --update` | Auto-accept all snapshot changes (DIFF and FAIL) |
 | `-a, --accept` | Auto-accept DIFF tests only (not FAIL) |

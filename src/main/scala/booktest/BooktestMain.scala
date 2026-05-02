@@ -24,6 +24,7 @@ object BooktestMain {
     var updateSnapshots = false  // -s: auto-accept snapshot changes
     var autoAcceptDiff = false  // -a: auto-accept DIFF tests (not FAIL)
     var continueMode = false  // -c: continue from last run, skip successful tests
+    var refreshDeps = false  // -r: force re-run of transitive deps (default: load from .bin if present)
     var threads = 1  // -p N: number of threads for parallel execution
     var garbageMode = false  // --garbage: list orphan files
     var cleanMode = false  // --clean: remove orphan files and temp directories
@@ -49,6 +50,7 @@ object BooktestMain {
         case "-s" | "--update" => updateSnapshots = true  // Auto-accept changes
         case "-a" | "--accept" => autoAcceptDiff = true  // Auto-accept DIFF tests
         case "-c" | "--continue" => continueMode = true  // Continue from last run
+        case "-r" | "--refresh-deps" => refreshDeps = true  // Force re-run of transitive deps
         case "--garbage" => garbageMode = true  // List orphan files in books/
         case "--clean" => cleanMode = true  // Remove orphan files and .tmp directories
         case "--invalidate-live-on-fail" => invalidateLiveOnFail = true
@@ -150,6 +152,7 @@ object BooktestMain {
       updateSnapshots = updateSnapshots,
       autoAcceptDiff = autoAcceptDiff,
       continueMode = continueMode,
+      refreshDeps = refreshDeps,
       threads = threads,
       booktestConfig = booktestConfig,
       invalidateLiveOnFail = invalidateLiveOnFail,
@@ -665,6 +668,8 @@ object BooktestMain {
     println("  -s, --update        Auto-accept snapshot changes (update mode)")
     println("  -S, --recapture     Force regenerate all snapshots")
     println("  -c, --continue      Continue from last run, skip successful tests")
+    println("  -r, --refresh-deps  Force re-run of transitive dependencies (default: load")
+    println("                      cached deps from .bin instead of re-executing them)")
     println("  -pN, -p N           Run tests in parallel using N threads (e.g., -p4)")
     println("  --diff-style STYLE  Diff display style: unified, side-by-side, inline, minimal")
     println("  --output-dir DIR    Output directory for test results (default: books)")
