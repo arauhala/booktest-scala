@@ -25,6 +25,7 @@ case class RunConfig(
   refreshDeps: Boolean = false,  // -r: force re-run of transitive dependencies (default: load from .bin if present)
   threads: Int = 1,  // -p N: number of threads for parallel execution
   output: java.io.PrintStream = System.out,  // Output stream (redirect for meta tests)
+  exactFilter: Boolean = false,  // true when filter comes from path resolution (SuiteName/testCase)
   booktestConfig: BooktestConfig = BooktestConfig.empty,  // test-root and groups config
   invalidateLiveOnFail: Boolean = false,  // --invalidate-live-on-fail
   // --trace / BOOKTEST_TRACE=1: also write the structured event log to
@@ -153,6 +154,18 @@ class TestRunner(config: RunConfig = RunConfig()) {
     * results automatically and doesn't need callers to query this. */
   def traceBuffer: RingBufferSink = ringBuffer
 
+  /** Names of tests in `testCases` that match the user's filter pattern.
+    * Honors `config.exactFilter`: exact equality when set (path-resolved
+    * `SuiteName/testCase` selection), substring match otherwise (the
+    * grep-style `-t` flag). With no filter, every test name is selected. */
+  private def matchedFilterNames(testCases: List[TestCase]): Set[String] =
+    config.testFilter match {
+      case Some(pattern) =>
+        if (config.exactFilter) testCases.filter(_.name == pattern).map(_.name).toSet
+        else testCases.filter(_.name.contains(pattern)).map(_.name).toSet
+      case None => testCases.map(_.name).toSet
+    }
+
   /** Expand the user's filter selection to include only those transitive
     * dependencies that actually need to run.
     *
@@ -208,10 +221,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
     // (Issue 1 Fix B) reflects exactly what's about to run.
     suite.liveResources.foreach(liveResources.register)
     val suitePath = config.getSuitePath(suite.fullClassName)
-    val matched = config.testFilter match {
-      case Some(pattern) => suite.testCases.filter(_.name.contains(pattern)).map(_.name).toSet
-      case None => suite.testCases.map(_.name).toSet
-    }
+    val matched = matchedFilterNames(suite.testCases)
     val expanded = expandSelectionWithMissingDeps(suite.testCases, suitePath, matched)
     scheduledInThisRun = expanded.map(tc => s"$suitePath/${tc.name}").toSet
     runSuiteWithFilter(suite, Set.empty)
@@ -494,10 +504,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       val fullClassName = suite.fullClassName
       val suitePath = config.getSuitePath(fullClassName)
       val testCases = suite.testCases
-      val matched = config.testFilter match {
-        case Some(pattern) => testCases.filter(_.name.contains(pattern)).map(_.name).toSet
-        case None => testCases.map(_.name).toSet
-      }
+      val matched = matchedFilterNames(testCases)
       val expanded = expandSelectionWithMissingDeps(testCases, suitePath, matched)
       expanded.map(tc => s"$suitePath/${tc.name}")
     }
@@ -535,10 +542,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
     suites.foreach { suite =>
       val suitePath = config.getSuitePath(suite.fullClassName)
       val testCases = suite.testCases
-      val matched = config.testFilter match {
-        case Some(pattern) => testCases.filter(_.name.contains(pattern)).map(_.name).toSet
-        case None => testCases.map(_.name).toSet
-      }
+      val matched = matchedFilterNames(testCases)
       val expanded = expandSelectionWithMissingDeps(testCases, suitePath, matched)
       val selected = if (config.continueMode)
         expanded.filter(tc => todoSet.contains(s"$suitePath/${tc.name}"))
@@ -717,15 +721,13 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val suitePath = config.getSuitePath(fullClassName)
     val testCases = suite.testCases
 
-    // Step 1: Apply name pattern filter; include only transitive deps that
-    // actually need to run. A dep with a fresh .bin cache is loaded by
-    // `resolveDependencyValue` at runtime instead of being re-executed.
-    // -r / --refresh-deps overrides this and forces every dep to re-run.
-    val matchedNames = config.testFilter match {
-      case Some(pattern) => testCases.filter(_.name.contains(pattern)).map(_.name).toSet
-      case None => testCases.map(_.name).toSet
-    }
-    val filteredTests = expandSelectionWithMissingDeps(testCases, suitePath, matchedNames)
+    // Step 1: Apply name filter (see `matchedFilterNames` for exact vs
+    // substring semantics) and include only transitive deps that actually
+    // need to run. A dep with a fresh .bin cache is loaded by
+    // `resolveDependencyValue` at runtime instead of being re-executed;
+    // -r / --refresh-deps overrides that and forces every dep to re-run.
+    val filteredTests = expandSelectionWithMissingDeps(
+      testCases, suitePath, matchedFilterNames(testCases))
 
     // Step 2: Apply continue mode filter (if enabled)
     val testsToRun = if (config.continueMode) {

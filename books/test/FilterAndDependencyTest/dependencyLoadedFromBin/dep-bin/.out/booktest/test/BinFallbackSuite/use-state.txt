@@ -1,0 +1,3 @@
+  using state: produced_state
+
+Test 'use-state' completed in 0ms

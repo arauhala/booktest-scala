@@ -32,6 +32,23 @@ New meta-suite `RefreshDepsTest` covers all three branches: cached dep
 is loaded from `.bin`, `-r` forces a re-run, and a missing `.bin`
 auto-includes the dep without `-r`.
 
+### Fix: path-resolved test selection uses exact match (not substring)
+
+When a CLI argument resolved to `SuiteName/testCase` (e.g. running
+`InvoicePerf/state-10M`), the test name was being substring-matched, so
+`state-10M` also picked up `optimized-state-10M` and any other test
+whose name contained the target as a substring.
+
+Path-resolved selections now use exact equality. The grep-style `-t`
+flag keeps substring matching for convenience. Internally, this is a
+new `RunConfig.exactFilter` flag that `BooktestMain` sets when the
+filter comes from path resolution (the `SuiteName.testCase` split path
+in argument resolution).
+
+New meta-suite `FilterAndDependencyTest` covers exact-vs-substring,
+auto-inclusion of dependencies under filtered runs, and `.bin`
+fallback for filtered-out dependencies.
+
 ## 0.4.2 (2026-04-29)
 
 ### Fix Issue 1: live-resource consumers could outrun their transitive TestRef producers under -pN
