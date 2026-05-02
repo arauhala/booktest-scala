@@ -32,14 +32,20 @@ object HttpSnapshot {
   implicit val rw: ReadWriter[HttpSnapshot] = macroRW
 }
 
+/** Per-test HTTP snapshot manager. Same defensive shape as the env/function
+  * managers — every read or write of `snapshots` / `capturedSnapshots` runs
+  * inside `lock.synchronized` so a test that issues HTTP calls from multiple
+  * threads doesn't lose captures or trip a ConcurrentModificationException
+  * during save. */
 class HttpSnapshotManager(testCaseRun: TestCaseRun) {
-  
+
   private val snapshotDir = testCaseRun.outDir / "_snapshots"
   private val snapshotFile = snapshotDir / "http.json"
-  
+
+  private val lock = new Object
   private var snapshots: Map[String, HttpSnapshot] = loadSnapshots()
   private var capturedSnapshots: Map[String, HttpSnapshot] = Map.empty
-  
+
   private def loadSnapshots(): Map[String, HttpSnapshot] = {
     if (os.exists(snapshotFile)) {
       try {
@@ -57,49 +63,57 @@ class HttpSnapshotManager(testCaseRun: TestCaseRun) {
       Map.empty
     }
   }
-  
+
   private def saveSnapshots(): Unit = {
-    if (capturedSnapshots.nonEmpty) {
+    val all = lock.synchronized {
+      if (capturedSnapshots.isEmpty) None
+      else Some(snapshots ++ capturedSnapshots)
+    }
+    all.foreach { allSnapshots =>
       os.makeDir.all(snapshotDir)
-      val allSnapshots = snapshots ++ capturedSnapshots
       val json = ujson.Obj.from(allSnapshots.map { case (hash, snapshot) =>
         hash -> ujson.read(write(snapshot))
       })
       os.write.over(snapshotFile, ujson.write(json, indent = 2))
     }
   }
-  
+
   private def createHash(request: HttpRequest): String = {
     val jsonStr = write(request)
     val digest = MessageDigest.getInstance("SHA-1")
     val hashBytes = digest.digest(jsonStr.getBytes("UTF-8"))
     hashBytes.map("%02x".format(_)).mkString
   }
-  
+
   def captureRequest(request: HttpRequest, response: HttpResponse): Unit = {
     val hash = createHash(request)
     val snapshot = HttpSnapshot(request, response, hash)
-    capturedSnapshots = capturedSnapshots + (hash -> snapshot)
+    lock.synchronized {
+      capturedSnapshots = capturedSnapshots + (hash -> snapshot)
+    }
   }
-  
+
   def findSnapshot(request: HttpRequest): Option[HttpSnapshot] = {
     val hash = createHash(request)
-    snapshots.get(hash) orElse capturedSnapshots.get(hash)
+    lock.synchronized {
+      snapshots.get(hash) orElse capturedSnapshots.get(hash)
+    }
   }
-  
+
   def mockRequest(request: HttpRequest): Option[HttpResponse] = {
     findSnapshot(request).map(_.response)
   }
-  
+
   def logSnapshots(): Unit = {
-    if (capturedSnapshots.nonEmpty) {
+    val captured = lock.synchronized(capturedSnapshots)
+    if (captured.nonEmpty) {
       testCaseRun.h1("HTTP Snapshots")
-      capturedSnapshots.values.toSeq.sortBy(_.request.url).foreach { snapshot =>
+      captured.values.toSeq.sortBy(_.request.url).foreach { snapshot =>
         testCaseRun.tln(s"${snapshot.request.method} ${snapshot.request.url} -> ${snapshot.response.statusCode}")
       }
     }
   }
-  
+
   def close(): Unit = {
     saveSnapshots()
     logSnapshots()

@@ -7,7 +7,7 @@ This guide is for using booktest-scala as a testing framework in your Scala proj
 Add to your `build.sbt`:
 
 ```scala
-libraryDependencies += "io.github.arauhala" %% "booktest-scala" % "0.3.0" % Test
+libraryDependencies += "io.github.arauhala" %% "booktest-scala" % "0.4.1" % Test
 ```
 
 Cross-compiled for Scala 2.12, 2.13, and 3.3.
@@ -41,15 +41,41 @@ class MyTests extends TestSuite {
 | `t.h3(text)` | Level 3 header | Yes |
 | `t.tln(text)` | Test line with newline | Yes |
 | `t.t(text)` | Test text (no newline) | Yes |
-| `t.iln(text)` | Info line with newline | No |
-| `t.i(text)` | Info text (no newline) | No |
+| `t.iln(text)` | Info line with newline | Info-only (cyan) |
+| `t.i(text)` | Info text (no newline) | Info-only (cyan) |
 | `t.key(key, value)` | Labeled key-value pair | Yes |
 | `t.assertln(condition)` | Assert and output OK/FAILED | Yes |
 | `t.assertln(label, cond)` | Assert with label | Yes |
-| `t.fail(msg)` | Mark test as failed | N/A |
-| `t.file(name)` | Get File in output dir | N/A |
+| `t.fail(msg)` | Mark test as failed (no exception) | N/A |
+| `t.f(text)` | Fail content — always marks test failed | Yes |
+| `t.fln(text)` | Fail content with newline | Yes |
+| `t.diff()` | Mark current line as a diff | N/A |
+| `t.file(name)` | Get File in test assets dir | N/A |
 
 Note: `t.tln` and `t.iln` can be called without parentheses to output an empty line.
+
+#### How info content interacts with snapshots
+
+`t.i` / `t.iln` content is written into the same `.md` snapshot file as
+`t.t` / `t.tln` — there is no separate sidecar. The difference is in how
+diffs are reported:
+
+- A token mismatch produced by `t.t` / `tln` increments the test's diff
+  counter, surfacing as a yellow `?` diff line and a DIFF result.
+- A token mismatch produced by `t.i` / `iln` increments only the
+  *info-diff* counter, surfacing as a cyan `.` line. It does NOT fail
+  the test.
+
+This is why `t.t("parsing..").iMsLn { ... }` is safe: the timing token
+is info-typed, so a `0ms` snapshot can match a `7ms` actual run with
+just an info-diff. Tokens are aligned 1:1 with the snapshot stream
+regardless of type, so a length-changing info value does not cascade
+into a diff on neighboring `t.t` content.
+
+If you do not want timings (or any volatile value) baked into the
+snapshot at all, write them with `println` to the test log instead, or
+use `t.iMsLn`'s sibling helpers and accept the cyan info-diffs as
+intended.
 
 ### Metrics with Tolerance
 
@@ -248,6 +274,26 @@ class DataTests extends TestSuite {
 }
 ```
 
+#### Dependency caching (build-system semantics)
+
+The producer's return value is persisted to `<output-dir>/.out/<suite>/<test>.bin`
+on every successful (OK or DIFF) run. When you later run only a subset of
+tests with `-t`, booktest behaves like a build system:
+
+- A transitive dep is re-run **only if** it matches the filter, its `.bin`
+  is missing, or `-r` / `--refresh-deps` is set.
+- Otherwise the cached value is loaded from `.bin` at runtime, and the
+  upstream test is not executed.
+
+This matches Python booktest's behavior. To force every dep on the path
+to re-run (e.g., before a benchmark where stale cached state would
+mislead), pass `-r`:
+
+```bash
+sbt "Test/runMain booktest.BooktestMain -t process myproject.DataTests"      # process only; setup loads from .bin
+sbt "Test/runMain booktest.BooktestMain -r -t process myproject.DataTests"   # setup re-runs too
+```
+
 ### Setup and Teardown
 
 ```scala
@@ -339,6 +385,260 @@ class ExpensiveTests extends TestSuite {
 }
 ```
 
+### Review Workflow (AI-Assisted Evaluation)
+
+A structured way to collect items that need human (or AI) judgment, batch
+them at the end of a test, and decide pass/fail. Mirrors Python booktest's
+`start_review()` / `reviewln()` / `end_review()` flow.
+
+```scala
+class ModelReviewTests extends TestSuite {
+  def testGptOutput(t: TestCaseRun): Unit = {
+    val response = generateResponse("What is the capital of France?")
+
+    t.h1("GPT Response")
+    t.iln(response)
+
+    t.startReview()
+    // (label, value, passed)
+    //   passed = Some(true)  -> [OK]
+    //   passed = Some(false) -> [FAIL] (and instance is invalidated for retests)
+    //   passed = None        -> [REVIEW] (needs human/AI decision)
+    t.reviewln("Response is accurate", "Yes", Some(true))
+    t.reviewln("Response is concise", s"${response.length} chars", None)
+    // shorthand: condition -> [OK]/[FAIL]
+    t.reviewln("contains 'Paris'", response.contains("Paris"))
+
+    val allPassed = t.endReview()
+    if (!allPassed) t.iln(s"${t.getReviewItems.size} item(s) need attention")
+  }
+}
+```
+
+`startReview()` writes a `## Review Section` header. Each `reviewln`
+writes `[OK]`, `[FAIL]`, or `[REVIEW]` followed by the label and value.
+`endReview()` returns true when nothing needs review.
+
+### Snapshot Navigation (Advanced)
+
+Booktest's snapshot reader maintains a CURSOR over the expected output.
+By default each `t.tln` advances it linearly. For tests where order isn't
+fixed (e.g., dictionary iteration), seek the cursor before writing:
+
+```scala
+def testNonLinearOutput(t: TestCaseRun): Unit = {
+  // Headers automatically seek to a matching line in the snapshot.
+  // Use anchor/seek explicitly when content arrives in non-fixed order.
+
+  t.anchor("Total: ")           // seek to a line starting with "Total: ", then write the prefix
+  t.tln(s"$total")              // continues writing on that anchored line
+
+  t.anchorln("# Summary")       // seek to exact line, write it as tested
+
+  // Manual cursor control:
+  t.seekLine("Section A")       // exact match
+  t.seekPrefix("Item ")         // line-prefix match
+  t.seek(_.contains("FOOBAR"))  // arbitrary predicate
+  t.jump(42)                    // absolute line number
+}
+```
+
+For metric-style tolerance against the previous snapshot value, peek the
+next expected token without consuming it:
+
+```scala
+def testTolerantOutput(t: TestCaseRun): Unit = {
+  t.t("score: ")
+  val previous = t.peekDouble.getOrElse(0.0)  // previous value from snapshot
+  val current  = computeScore()
+  // emit previous if within 5%, else current — keeps snapshot stable
+  val toEmit = if (math.abs(current - previous) / previous < 0.05) previous else current
+  t.tln(toEmit.toString)
+}
+
+// Peek API:
+//   t.peekDouble: Option[Double]
+//   t.peekLong:   Option[Long]
+//   t.peekToken:  Option[String]
+//   t.skipToken(): Unit
+```
+
+`tmetric`, `tLongLn`, `tDoubleLn` use this internally — most tests don't
+need to touch peek directly.
+
+### Live Resources
+
+Share an expensive `AutoCloseable` (database, HTTP server, process) across
+many test consumers. The runner builds it on first use and closes it
+when the last consumer finishes. Pool/capacity allocations are held for
+the resource's lifetime.
+
+```scala
+class StringServer(port: Int, payload: String) extends AutoCloseable {
+  // ... starts/stops an HttpServer on `port` ...
+}
+
+class ServerTests extends TestSuite {
+  // Plain test producing serializable state — same as today.
+  val state: TestRef[String] = test("createState") { (t: TestCaseRun) =>
+    t.tln("State: hello world"); "hello world"
+  }
+
+  // Live resource: depends on `state` (a TestRef) and a port from the
+  // existing PortPool. Built once on first consumer; closed when the
+  // last consumer finishes; port returned to the pool inside close().
+  val server: ResourceRef[StringServer] =
+    liveResource("server", state, resources.ports) {
+      (s: String, port: Int) => new StringServer(port, s)
+    }
+
+  // Consumers depend on the ResourceRef and receive the live object.
+  test("clientGet", server) { (t: TestCaseRun, http: StringServer) =>
+    t.tln(s"GET /echo -> ${http.get("/echo")}")
+  }
+
+  test("clientLength", server) { (t: TestCaseRun, http: StringServer) =>
+    t.tln(s"length: ${http.get("/echo").length}")
+  }
+}
+```
+
+#### Lifecycle: who builds, who closes
+
+A live resource's lifecycle is **fully managed by the runner**. The
+runner is the only thing that calls `build` and the only thing that
+calls `close()`. Consumers only borrow the live instance for the
+duration of one test.
+
+The full lifecycle of one resource in a single run:
+
+1. **Pre-pass — refcount reservation.** Before any test executes, the
+   runner walks the set of selected tests and increments a refcount on
+   every live resource each one transitively depends on. This is what
+   keeps an instance alive across tests that share it: the refcount
+   doesn't drop to zero until the last consumer has released.
+2. **First acquire — build.** When the first consumer starts, the
+   runner resolves the resource's deps (loading `TestRef`s from
+   `.bin`, recursing into nested `ResourceRef`s, acquiring pool slots,
+   reserving capacity) and invokes the `build` closure exactly once.
+   Pool/capacity allocations made during this step are held for the
+   resource's lifetime — they are NOT released back per consumer.
+3. **Per-consumer acquire/release.** Each consumer receives the live
+   instance via dep injection. Concurrent vs serialized depends on
+   share mode (see table below). The runner records the borrow on
+   acquire and decrements the refcount on release.
+4. **Last release — close.** When the last consumer's release drops
+   the refcount to zero, the runner calls `close()` on the instance
+   and releases every pool/capacity allocation back to its pool.
+5. **End-of-run safety net.** `runner.shutdownAll()` runs in a
+   `finally` after the test loop and force-closes any instances still
+   alive, so a crash mid-run can't leak processes/ports.
+
+Build is invoked on the thread of whichever consumer first acquires
+the resource (under a per-resource build lock so concurrent first
+consumers don't each build their own). Close is called inline at the
+last release, on the thread of whichever consumer releases last.
+
+#### Consumer contract: do not close the injected handle
+
+> **Calling `.close()` on a `ResourceRef`-injected handle is never
+> correct.** The `T <: AutoCloseable` bound exists so the runner can
+> close the instance at end-of-life — it does not authorize consumers
+> to do the same.
+
+The handle a consumer receives is **borrowed**, not owned: the runner
+owns lifecycle and refcount. A consumer that calls `close()` (often
+indirectly, e.g. through Scala's `using { handle => ... }` or a
+try-with-resources idiom) closes the underlying instance out from
+under every other consumer that hasn't run yet, leading to silent
+corruption: the next consumer either sees a half-torn-down service
+and produces nonsense snapshots, or the runner double-closes at end
+of life.
+
+If you're migrating from a per-test setup/teardown pattern where the
+consumer owned the handle, scrub `using` / `Try { ... } finally
+handle.close()` calls from any test that takes a `ResourceRef`-injected
+parameter. If a per-consumer fresh instance is genuinely required,
+declare with `exclusiveResource(...)` instead — that gives each
+consumer its own instance to own.
+
+There is no runtime guard for this today (a generic close-guard would
+require wrapping arbitrary `T`, which doesn't compose for sealed/final
+types). Tests that mis-close are a quiet footgun; treat the contract
+as part of the API.
+
+#### Sharing modes
+
+| Declaration | When to use |
+|---|---|
+| `liveResource(name, deps...) { build }` | Default. One instance, many concurrent readers. Tests promise not to mutate observable state. |
+| `liveResourceSerialized(name, deps...) { build }` | One instance, but consumers run **one at a time** (per-instance lock). No reset is called between consumers — state from the previous consumer persists. Use when the resource is read-only at the consumer level but produces snapshot output that's not safe to interleave (shared loggers, multiline report builders). Same fail-keep policy as the default `liveResource`. |
+| `liveResourceWithReset(name, deps...) { build } { reset }` | Stateful resource. Runner serializes consumer access (per-instance lock) and calls `reset(handle)` between consumers. Build/close still happen exactly once. |
+| `exclusiveResource(name, deps...) { build }` | Each consumer gets its own fresh instance. Equivalent to today's per-test setup/teardown. |
+
+#### Dependency types
+
+Mix freely in the dep list:
+
+- `TestRef[T]` — a prior test's return value (loaded from `.bin`, or
+  auto-run if missing).
+- `ResourceRef[T]` — another live resource. Refcount-shared; the runner
+  resolves transitively.
+- `ResourcePool[T]` — the existing pool API (e.g. `resources.ports`).
+  The acquired value is **held by the live resource for its lifetime**
+  and returned to the pool inside `close()`.
+- `ResourceCapacity[N].reserve(amount)` — see Capacity below.
+
+#### Capacity (numeric budgets)
+
+For RAM, CPU shares, GPU memory, etc., declare a `capacity` and reserve
+fractions per resource:
+
+```scala
+val ram = capacity("ram", 4096.0)  // 4 GB total
+
+val server: ResourceRef[Server] =
+  liveResource("server", ram.reserve(1024.0)) { (mb: Double) =>
+    new Server(allocatedMb = mb)
+  }
+```
+
+Capacities are **process-global** — multiple suites declaring `capacity("ram", N)`
+share one budget. Override the total at runtime:
+
+- `BOOKTEST_CAPACITY_RAM=8192` env var.
+- `--capacity ram=8192` CLI flag.
+
+The runner pre-validates that no single resource exceeds its capacity
+total (which would deadlock on acquire). Cross-resource sums are not
+validated statically — the runtime acquire path blocks safely if real
+demand exceeds capacity.
+
+#### Failure handling
+
+| Event | Action |
+|---|---|
+| `build` throws | Consumer FAILs with the cause; partial pool/capacity allocations released; sibling tests still run. |
+| `close` throws | Swallowed; allocations released anyway. |
+| `reset` throws | Instance invalidated; next consumer triggers a fresh build. |
+| Consumer fails on `withReset` | Instance always invalidated (state is unknown). |
+| Consumer fails on `SharedReadOnly` or `SharedSerialized` | Instance kept by default. Pass `--invalidate-live-on-fail` to force close + rebuild. |
+
+#### Verbose output
+
+`-v` prints lifecycle events and an end-of-run summary:
+
+```
+[build  myTests/server] 110 ms
+clientGet ok 142 ms
+clientLength ok 1 ms
+clientUpper ok 1 ms
+[close  myTests/server] 101 ms
+
+# live resources:
+  myTests/server: builds=1 closes=1 resets=0 alive=140 ms (build 110 ms, close 101 ms)
+```
+
 ## Configuration (`booktest.ini`)
 
 Create a `booktest.ini` in your project root:
@@ -381,8 +681,11 @@ sbt "Test/runMain booktest.BooktestMain -p4 myproject.MyTests"
 # Continue mode - only re-run failures
 sbt "Test/runMain booktest.BooktestMain -c myproject.MyTests"
 
-# Filter by name pattern
+# Filter by name pattern (cached transitive deps load from .bin and are not re-run)
 sbt "Test/runMain booktest.BooktestMain -v -t model myproject.MyTests"
+
+# Force re-run of transitive dependencies as well (use before benchmarks)
+sbt "Test/runMain booktest.BooktestMain -v -r -t model myproject.MyTests"
 
 # Interactive mode (accept/reject snapshot changes)
 sbt "Test/runMain booktest.BooktestMain -i myproject.MyTests"
@@ -421,13 +724,31 @@ sbt "Test/runMain booktest.BooktestMain --clean"
 | `-w, --review` | Review mode (show diffs without running) |
 | `-pN` | Parallel execution with N threads |
 | `-c, --continue` | Skip tests that passed in previous run |
+| `-r, --refresh-deps` | Force re-run of transitive dependencies (default: load from `.bin` if present) |
 | `-S, --recapture` | Force regenerate all snapshots |
-| `-s, --update` | Auto-accept all snapshot changes |
+| `-s, --update` | Auto-accept all snapshot changes (DIFF and FAIL) |
+| `-a, --accept` | Auto-accept DIFF tests only (not FAIL) |
+| `--batch-review` | Sequential interactive review of all failures at end |
 | `--tree` | Hierarchical tree display (with `-l`) |
-| `--inline` | Show diffs inline during execution |
+| `--inline` | Show diffs inline during execution (default: at end) |
+| `--diff-style STYLE` | `unified` (default) / `side-by-side` / `inline` / `minimal` |
+| `--output-dir DIR` | Override output directory (default: `books`) |
+| `--snapshot-dir DIR` | Override snapshot directory (default: `books`) |
+| `--root PREFIX` | Override `root` from `booktest.ini` |
 | `--garbage` | List orphan files in books/ |
 | `--clean` | Remove orphan files and tmp directories |
+| `--invalidate-live-on-fail` | Force-close shared live resources after a consumer failure (default: keep alive) |
+| `--capacity NAME=VALUE` | Override a `capacity(NAME, _)` total at runtime |
 | `--help` | Show help |
+
+### Environment Variables
+
+| Variable | Effect |
+|---|---|
+| `BOOKTEST_PORT_BASE` | Port pool starting port (default: 10000) |
+| `BOOKTEST_PORT_MAX` | Port pool maximum port (default: 60000) |
+| `BOOKTEST_PORT_COOLDOWN_MS` | Cooldown between releasing and re-issuing the same port (default: 250). Prevents the kernel from racing a fresh bind against the previous listener's teardown. Set to 0 to disable. |
+| `BOOKTEST_CAPACITY_<NAME>` | Override `capacity(name, _)` total (uppercase suffix) |
 
 ## Snapshot Directory Structure
 
@@ -437,7 +758,8 @@ books/
 │   └── SuiteName/
 │       ├── testName/            # Tmp directory for test
 │       ├── testName.bin         # Return value cache (for dependencies)
-│       ├── testName.md          # Test output
+│       ├── testName.md          # Test output (raw captured content)
+│       ├── testName.txt         # Per-line diff report + status/duration
 │       ├── testName.log         # Captured stdout/stderr
 │       └── testName.snapshots.json  # HTTP/function snapshots
 ├── SuiteName/                   # Committed snapshots
@@ -445,6 +767,16 @@ books/
 │   └── testName/                # Asset directory (images, etc.)
 └── cases.ndjson                 # Test results for continue mode
 ```
+
+### What each `.out/<suite>/<test>.*` file contains
+
+| File | Purpose |
+|---|---|
+| `<test>.md` | The raw captured test output. This is what gets compared (or copied) to the committed snapshot at `books/<Suite>/<test>.md`. CI snapshot drift is best inspected here. |
+| `<test>.txt` | The human-readable diff report (every line with `?` / `.` / `!` markers and side-by-side expected vs actual), followed by a final status/duration line. Mirrors Python booktest's per-test `.txt`. **This is the file CI artifact viewers should land on after a flagged DIFF** — it explains what changed without you having to diff `.md` against the snapshot manually. |
+| `<test>.log` | Captured stdout/stderr produced during the test (from `println`, logging, etc.). |
+| `<test>.bin` | Cached return value for dependency injection between tests (`@DependsOn` / `test(name, dep)`). Deleted when a test FAILs. |
+| `<test>.snapshots.json` | HTTP / function-call snapshots used by `HttpSnapshotting`, `EnvSnapshotting`, `FunctionSnapshotting`. |
 
 ## Workflow
 

@@ -1,0 +1,32 @@
+
+# test results:
+
+  booktest/test/TraceFailHelper/state..[93mDIFF[39m 0 ms
+  booktest/test/TraceFailHelper/consumer..[93mDIFF[39m 1 ms
+
+============================================================
+[91m# 2 test(s) with differences:[39m
+============================================================
+
+[93m## booktest/test/TraceFailHelper/state[39m
+----------------------------------------
+Trace context for booktest/test/TraceFailHelper/state (last 1 events):
+------------------------------------------------------------
+  T4       2026-04-29T06:54:04.784145224Z sched-ready    booktest/test/TraceFailHelper/state  producers=[]
+------------------------------------------------------------
+
+[93m## booktest/test/TraceFailHelper/consumer[39m
+----------------------------------------
+Test explicitly failed: force a fail so the trace block is attached
+
+Trace context for booktest/test/TraceFailHelper/consumer (last 6 events):
+------------------------------------------------------------
+  T4       2026-04-29T06:54:04.784145224Z sched-ready    booktest/test/TraceFailHelper/state  producers=[]
+  T1       2026-04-29T06:54:04.786437465Z task-end       booktest/test/TraceFailHelper/state  result=diff ms=0
+  T4       2026-04-29T06:54:04.794636782Z sched-ready    booktest/test/TraceFailHelper/consumer  producers=[state]
+  T2       2026-04-29T06:54:04.795871883Z dep-resolve    booktest/test/TraceFailHelper/consumer  dep=booktest/test/TraceFailHelper/state source=memory value=the-state
+  T2       2026-04-29T06:54:04.796034022Z task-run       booktest.test.TraceFailHelper/handle  instance=#541ecbe8 ms=1
+  T2       2026-04-29T06:54:04.796183738Z task-acquire   booktest.test.TraceFailHelper/handle  consumer=consumer instance=#541ecbe8 refcount=1
+------------------------------------------------------------
+
+============================================================

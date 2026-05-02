@@ -3,6 +3,7 @@ package booktest
 import os.Path
 import fansi.Color
 import fansi.Color.{LightRed, LightGreen, LightYellow, LightCyan}
+import scala.util.control.NonFatal
 
 private[booktest] object Colors {
   val Orange = Color.True(255, 165, 0)
@@ -19,11 +20,19 @@ case class RunConfig(
   summaryMode: Boolean = true,  // Python-style: show diffs at end (default)
   recaptureAll: Boolean = false,  // -S: force regenerate all snapshots
   updateSnapshots: Boolean = false,  // -s: auto-accept snapshot changes
+  autoAcceptDiff: Boolean = false,  // -a: auto-accept DIFF tests (not FAIL)
   continueMode: Boolean = false,  // -c: continue from last run, skip successful tests
+  refreshDeps: Boolean = false,  // -r: force re-run of transitive dependencies (default: load from .bin if present)
   threads: Int = 1,  // -p N: number of threads for parallel execution
   output: java.io.PrintStream = System.out,  // Output stream (redirect for meta tests)
   exactFilter: Boolean = false,  // true when filter comes from path resolution (SuiteName/testCase)
-  booktestConfig: BooktestConfig = BooktestConfig.empty  // test-root and groups config
+  booktestConfig: BooktestConfig = BooktestConfig.empty,  // test-root and groups config
+  invalidateLiveOnFail: Boolean = false,  // --invalidate-live-on-fail
+  // --trace / BOOKTEST_TRACE=1: also write the structured event log to
+  // <outputDir>/.booktest.log. The runner always keeps a bounded
+  // in-memory ring buffer (used to attach a "Trace context" block to
+  // failure reports) regardless of this flag.
+  trace: Boolean = sys.env.contains("BOOKTEST_TRACE")
 ) {
   /** Get the test path for a suite, applying test-root stripping */
   def getSuitePath(suiteName: String): String = {
@@ -72,20 +81,149 @@ case class RunResult(
   }
 }
 
+object TestRunner {
+  /** Unwrap reflection wrappers so reports show the underlying cause. */
+  private[booktest] def unwrapInvocationTarget(t: Throwable): Throwable = t match {
+    case ite: java.lang.reflect.InvocationTargetException if ite.getCause != null =>
+      unwrapInvocationTarget(ite.getCause)
+    case _ => t
+  }
+
+  /** Format an exception with full stack trace (and chained causes) so
+    * race-condition–style failures are diagnosable from logs/CI output. */
+  private[booktest] def formatStackTrace(t: Throwable): String = {
+    val sw = new java.io.StringWriter()
+    t.printStackTrace(new java.io.PrintWriter(sw))
+    sw.toString
+  }
+}
+
 class TestRunner(config: RunConfig = RunConfig()) {
   private val dependencyCache = new DependencyCache()
   private val resourceManager = ResourceManager.fromEnv()
+  /** Always-on bounded ring buffer of trace events; used to attach a
+    * "Trace context" block to failure reports without requiring the
+    * user to opt in to tracing first. */
+  private val ringBuffer = new RingBufferSink()
+  /** Optional extra logfile sink, opened lazily on first emit. */
+  private val logfile: Option[LogfileSink] =
+    if (config.trace) Some(new LogfileSink(config.outputDir / ".booktest.log"))
+    else None
+  /** The trace bus the runner and the live-resource manager both write
+    * to. */
+  private val trace: TaskTrace =
+    logfile match {
+      case Some(lf) => new BroadcastTrace(ringBuffer, lf)
+      case None     => ringBuffer
+    }
+  private val liveResources = {
+    val mgr = new LiveResourceManager(trace = trace)
+    if (config.verbose) {
+      mgr.listener = new LiveResourceListener {
+        override def onBuild(name: String, durationMs: Long): Unit =
+          config.output.println(s"  [build $name] ${durationMs} ms")
+        override def onClose(name: String, durationMs: Long): Unit =
+          config.output.println(s"  [close $name] ${durationMs} ms")
+        override def onReset(name: String, durationMs: Long): Unit =
+          config.output.println(s"  [reset $name] ${durationMs} ms")
+      }
+    }
+    mgr
+  }
   @volatile private var interactiveQuit = false
+  /** Qualified test names ("<suitePath>/<testName>") that are scheduled
+    * to run in the current `runMultipleSuites` invocation. Populated by
+    * the pre-pass; consulted by `loadDependencyValue` so the disk
+    * `.bin` fallback never preempts a producer that's about to run.
+    *
+    * Issue 1 Fix B from `.ai/plan/task-graph.md`: even with the
+    * scheduler's producer-aware readiness predicate (Fix A), the cache
+    * is the second line of defense. If a producer is in this run, only
+    * the in-memory cache (which is populated when the producer
+    * completes) may answer for it; disk `.bin` reflects a *prior*
+    * invocation and would silently serve stale data. */
+  @volatile private var scheduledInThisRun: Set[String] = Set.empty
   private val out = config.output
 
   /** Get the resource manager for tests that need ports/resources */
   def resources: ResourceManager = resourceManager
-  
+
+  /** Inspect the trace events recorded so far. Intended for meta-tests
+    * that want to assert on lifecycle ordering / dep resolution
+    * sources; the production runner attaches a trace block to failing
+    * results automatically and doesn't need callers to query this. */
+  def traceBuffer: RingBufferSink = ringBuffer
+
+  /** Names of tests in `testCases` that match the user's filter pattern.
+    * Honors `config.exactFilter`: exact equality when set (path-resolved
+    * `SuiteName/testCase` selection), substring match otherwise (the
+    * grep-style `-t` flag). With no filter, every test name is selected. */
+  private def matchedFilterNames(testCases: List[TestCase]): Set[String] =
+    config.testFilter match {
+      case Some(pattern) =>
+        if (config.exactFilter) testCases.filter(_.name == pattern).map(_.name).toSet
+        else testCases.filter(_.name.contains(pattern)).map(_.name).toSet
+      case None => testCases.map(_.name).toSet
+    }
+
+  /** Expand the user's filter selection to include only those transitive
+    * dependencies that actually need to run.
+    *
+    * Mirrors Python booktest's `Tests.method_dependencies`: a dep is
+    * included only if (a) it is itself selected by the filter, (b)
+    * `--refresh-deps` (-r) is set, or (c) its `.bin` cache file is
+    * missing. Cached deps are loaded at runtime by
+    * `resolveDependencyValue` from `<output-dir>/.out/<suite>/<dep>.bin`,
+    * so re-running them when the matched test only consumes their
+    * cached return value is wasted work.
+    *
+    * Live-resource names (which never have `.bin` files) are skipped so
+    * they don't end up in the test run list — they are managed by
+    * `LiveResourceManager` and reserved separately by the pre-pass.
+    */
+  private def expandSelectionWithMissingDeps(
+    testCases: List[TestCase],
+    suitePath: String,
+    matchedNames: Set[String]
+  ): List[TestCase] = {
+    val testMap = testCases.map(tc => tc.name -> tc).toMap
+    val needed = scala.collection.mutable.LinkedHashSet[String]()
+
+    def hasBin(depName: String): Boolean =
+      os.exists(config.outputDir / ".out" / os.RelPath(suitePath) / s"$depName.bin")
+
+    def shouldRun(depName: String): Boolean =
+      if (matchedNames.contains(depName)) true
+      else if (config.refreshDeps) true
+      else if (liveResources.isRegistered(depName)) false
+      else !hasBin(depName)
+
+    def walk(name: String): Unit = {
+      if (needed.contains(name)) return
+      testMap.get(name).foreach { tc =>
+        tc.dependencies.foreach { dep =>
+          if (shouldRun(dep)) walk(dep)
+        }
+      }
+      needed += name
+    }
+
+    matchedNames.foreach(walk)
+    testCases.filter(tc => needed.contains(tc.name))
+  }
+
   /** Run a single suite (without continue mode filtering).
     * For continue mode support, use runMultipleSuites instead.
     */
   def runSuite(suite: TestSuite): RunResult = {
-    // Delegate to runSuiteWithFilter with empty todoSet (run all tests)
+    // Mirror the runMultipleSuites pre-pass for the single-suite path,
+    // so live resources are registered and the cache run-set
+    // (Issue 1 Fix B) reflects exactly what's about to run.
+    suite.liveResources.foreach(liveResources.register)
+    val suitePath = config.getSuitePath(suite.fullClassName)
+    val matched = matchedFilterNames(suite.testCases)
+    val expanded = expandSelectionWithMissingDeps(suite.testCases, suitePath, matched)
+    scheduledInThisRun = expanded.map(tc => s"$suitePath/${tc.name}").toSet
     runSuiteWithFilter(suite, Set.empty)
   }
   
@@ -136,20 +274,30 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val logCapture = new LogCapture(testRun.logFile)
     logCapture.start()
 
+    // Tracks whether the test failed for live-resource invalidation in
+    // the finally block.
+    var consumerFailed = false
+
     try {
       // Call setup hook
       if (suite != null) {
         try { suite.getSetup(testRun) }
-        catch { case e: Exception => testRun.iln(s"Setup failed: ${e.getMessage}") }
+        catch { case e: Exception =>
+          testRun.iln(s"Setup failed: ${e.getMessage}")
+          testRun.iln(TestRunner.formatStackTrace(e))
+        }
       }
 
       val returnValue = try {
-        executeTestWithDependencies(testCase, testRun, suitePath)
+        executeTestWithDependencies(testCase, testRun, suitePath, suite)
       } finally {
         // Call teardown hook (always, even if test fails)
         if (suite != null) {
           try { suite.getTeardown(testRun) }
-          catch { case e: Exception => testRun.iln(s"Teardown failed: ${e.getMessage}") }
+          catch { case e: Exception =>
+            testRun.iln(s"Teardown failed: ${e.getMessage}")
+            testRun.iln(TestRunner.formatStackTrace(e))
+          }
         }
       }
 
@@ -164,6 +312,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       // Check if test explicitly failed via t.fail()
       val result = if (testRun.isFailed) {
         val failMsg = testRun.failMessage.map(m => s": $m").getOrElse("")
+        consumerFailed = true
         snapshotResult.copy(
           testName = fullTestName,
           passed = false,
@@ -186,8 +335,9 @@ class TestRunner(config: RunConfig = RunConfig()) {
       // Write report file
       testRun.writeReport(s"Test '${testCase.name}' completed in ${duration}ms")
 
-      // Handle -S (recapture all) and -s (update snapshots) flags
-      val autoAccept = config.recaptureAll || config.updateSnapshots
+      // Handle -S (recapture all), -s (update snapshots), -a (accept diffs) flags
+      val autoAccept = config.recaptureAll || config.updateSnapshots ||
+        (config.autoAcceptDiff && result.successState == SuccessState.DIFF)
 
       // Cache the return value on OK or DIFF (test ran successfully).
       // On FAIL (exception/t.fail()), delete any stale .bin file.
@@ -229,7 +379,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
           out.println()
           if (config.interactive) {
             val isFailed = result.successState == SuccessState.FAIL
-            SnapshotManager.interact(testRun.snapshotFile, testRun.outFile, testRun.logFile, isFailed)
+            SnapshotManager.interact(testRun.snapshotFile, testRun.outFile, testRun.logFile, isFailed, fullTestName)
           } else {
             InteractiveResponse.Reject
           }
@@ -263,7 +413,19 @@ class TestRunner(config: RunConfig = RunConfig()) {
       }
 
     } catch {
-      case e: Exception =>
+      case NonFatal(rawErr) =>
+        // Reflection wraps test-method exceptions in InvocationTargetException;
+        // unwrap so reports show the underlying cause, not "exception: null".
+        val e = TestRunner.unwrapInvocationTarget(rawErr)
+        consumerFailed = true
+        // Write exception to output like Python: t.iln(traceback.format_exc())
+        // NonFatal catches Errors like NotImplementedError/AssertionError too, so a
+        // single broken test doesn't poison the whole batch.
+        testRun.iln()
+        testRun.fail()
+        testRun.iln(s"test raised exception ${e.getClass.getName}: ${e.getMessage}")
+        testRun.iln(TestRunner.formatStackTrace(e))
+
         // Finalize output on error
         testRun.end()
         // Stop log capture on error
@@ -271,39 +433,49 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
         val endTime = System.currentTimeMillis()
         val duration = endTime - startTime
+
+        // Compare snapshot (exception is now part of output)
+        val snapshotResult = SnapshotManager.compareTest(testRun, config.diffMode)
         val errorMessage = s"Test '${testCase.name}' failed with exception: ${e.getMessage}"
 
         // Write error report
         testRun.writeReport(s"Test '${testCase.name}' FAILED: ${e.getMessage}\nDuration: ${duration}ms")
 
+        // Delete cached return value on failure
+        testRun.deleteReturnValue()
+
         if (config.verbose) {
-          // Print any partial output in verbose mode
-          val output = testRun.getTestOutput
-          if (output.nonEmpty) {
-            output.linesIterator.foreach { line =>
-              out.println(s"  $line")
-            }
-            out.println()
-          }
+          // Print test output in verbose mode
+          printVerboseOutput(testRun)
           out.println(s"$suiteName/${testCase.name} ${LightRed("FAIL")} ${duration} ms.")
           out.println()
           out.println(LightRed(errorMessage))
-          e.printStackTrace()
           out.println()
         } else {
           out.println(s"FAILED in ${duration} ms")
         }
 
-        TestResult(
+        snapshotResult.copy(
           testName = fullTestName,
           passed = false,
-          output = "",
-          diff = Some(errorMessage),
+          successState = SuccessState.FAIL,
+          diff = snapshotResult.diff.orElse(Some(errorMessage)),
           durationMs = duration
         )
     } finally {
       // Release resource locks
       locks.foreach(lock => resourceManager.locks.release(lock))
+      // Release every transitively-reserved live resource for this
+      // consumer (in dep order — nested last). Direct dep gets the
+      // failure flag so SharedWithReset / invalidate-on-fail trigger;
+      // transitive nested deps don't need that signal.
+      val reach = liveResources.transitiveResourceClosure(testCase.dependencies)
+      val direct = testCase.dependencies.toSet
+      reach.foreach { name =>
+        liveResources.release(name, testCase.name,
+          failed = consumerFailed && direct.contains(name),
+          invalidateOnFail = config.invalidateLiveOnFail)
+      }
     }
   }
 
@@ -315,25 +487,36 @@ class TestRunner(config: RunConfig = RunConfig()) {
     out.println("# test results:")
     out.println()
 
+    // Register live-resource declarations from every suite so dep resolution
+    // can detect "this dep name is a live resource, not a test cache".
+    suites.foreach(_.liveResources.foreach(liveResources.register))
+
     // Load previous case reports for continue mode
     val outDir = config.outputDir / ".out"
     val oldReports = CaseReports.fromDir(outDir)
 
-    // Build list of all selected test names (for continue mode calculation)
+    // Build list of all selected test names (for continue mode calculation).
+    // Cache-aware: a transitive dep is only added to the run-list if it is
+    // also matched by the filter, --refresh-deps is set, or its .bin is
+    // missing. Otherwise the dep stays out and `resolveDependencyValue`
+    // will load it from .bin at runtime.
     val allSelectedTestNames = suites.flatMap { suite =>
       val fullClassName = suite.fullClassName
       val suitePath = config.getSuitePath(fullClassName)
       val testCases = suite.testCases
-      val filteredTests = config.testFilter match {
-        case Some(pattern) => testCases.filter(_.name.contains(pattern))
-        case None => testCases
-      }
-      filteredTests.map(tc => s"$suitePath/${tc.name}")
+      val matched = matchedFilterNames(testCases)
+      val expanded = expandSelectionWithMissingDeps(testCases, suitePath, matched)
+      expanded.map(tc => s"$suitePath/${tc.name}")
     }
 
     // Apply continue mode logic
     val (doneCaseReports, todoTestNames) = oldReports.casesToDoneAndTodo(allSelectedTestNames, config.continueMode)
     val todoSet = todoTestNames.toSet
+
+    // Issue 1 Fix B: tell the cache which tests are scheduled in this
+    // invocation, so its disk `.bin` fallback can defer to the in-memory
+    // cache for producers that are about to run.
+    scheduledInThisRun = todoSet
 
     // Track results from skipped tests (continue mode)
     val skippedResults = if (config.continueMode && doneCaseReports.nonEmpty) {
@@ -351,13 +534,64 @@ class TestRunner(config: RunConfig = RunConfig()) {
       List.empty
     }
 
-    // Run suites (filtering out tests that were skipped in continue mode)
-    val allResults = if (config.threads > 1) {
-      runSuitesParallel(suites, todoSet)
-    } else {
-      suites.takeWhile(_ => !interactiveQuit).map { suite =>
-        runSuiteWithFilter(suite, todoSet)
+    // Pre-pass: pre-reserve refcount for each (test, direct-resource-dep)
+    // edge so a shared resource doesn't close between tests that need it.
+    // Also collect the set of reachable live resources for capacity
+    // validation and the locality scheduler.
+    val reachableLiveResources = scala.collection.mutable.Set[String]()
+    suites.foreach { suite =>
+      val suitePath = config.getSuitePath(suite.fullClassName)
+      val testCases = suite.testCases
+      val matched = matchedFilterNames(testCases)
+      val expanded = expandSelectionWithMissingDeps(testCases, suitePath, matched)
+      val selected = if (config.continueMode)
+        expanded.filter(tc => todoSet.contains(s"$suitePath/${tc.name}"))
+      else expanded
+      selected.foreach { tc =>
+        // Reserve transitively: every live resource reachable from this
+        // test's direct deps gets +1 on its refcount, so nested
+        // resources stay alive across all transitive consumers.
+        val reach = liveResources.transitiveResourceClosure(tc.dependencies)
+        reach.foreach { name =>
+          liveResources.reserve(name, tc.name)
+          reachableLiveResources += name
+        }
       }
+    }
+    // Pre-pass: capacity validation. Reject only the case that's
+    // statically guaranteed to deadlock — a single resource reserves more
+    // than the capacity total. Cross-resource sums depend on actual
+    // concurrency (test ordering, -pN), and the runtime acquire path
+    // already blocks safely if real demand exceeds capacity.
+    reachableLiveResources.foreach { name =>
+      liveResources.lookup(name).foreach { defn =>
+        defn.deps.foreach {
+          case CapacityDep(cap, amount) =>
+            val capName = cap match { case d: DoubleCapacity => d.name; case _ => "?" }
+            val amt = amount match { case d: Double => d; case _ => 0.0 }
+            val avail = cap.capacity match { case d: Double => d; case _ => Double.PositiveInfinity }
+            if (amt > avail) {
+              throw new IllegalStateException(
+                s"Capacity '$capName' over-committed: '$name' reserves $amt > capacity $avail. " +
+                s"Override with --capacity $capName=<larger> or BOOKTEST_CAPACITY_${capName.toUpperCase}.")
+            }
+          case _ => ()
+        }
+      }
+    }
+
+    // Run suites (filtering out tests that were skipped in continue mode)
+    val allResults = try {
+      if (config.threads > 1) {
+        runSuitesParallel(suites, todoSet)
+      } else {
+        suites.takeWhile(_ => !interactiveQuit).map { suite =>
+          runSuiteWithFilter(suite, todoSet)
+        }
+      }
+    } finally {
+      // Force teardown of any still-alive live resources at end of run.
+      liveResources.shutdownAll()
     }
 
     val endTime = System.currentTimeMillis()
@@ -407,6 +641,9 @@ class TestRunner(config: RunConfig = RunConfig()) {
       printCollectedDiffs(finalResults)
     }
 
+    // End-of-run live-resource summary (verbose only).
+    if (config.verbose) printLiveResourceSummary()
+
     RunResult(
       totalTests = totalTests,
       passedTests = finalPassedCount,
@@ -414,6 +651,19 @@ class TestRunner(config: RunConfig = RunConfig()) {
       results = finalResults,
       totalDurationMs = totalDuration
     )
+  }
+
+  private def printLiveResourceSummary(): Unit = {
+    val stats = liveResources.statsSnapshot.filter(_.builds > 0)
+    if (stats.isEmpty) return
+    out.println()
+    out.println("# live resources:")
+    out.println()
+    stats.sortBy(_.name).foreach { s =>
+      out.println(s"  ${s.name}: builds=${s.builds} closes=${s.closes} " +
+        s"resets=${s.resets} alive=${s.totalAliveMs} ms " +
+        s"(build ${s.totalBuildMs} ms, close ${s.totalCloseMs} ms)")
+    }
   }
   
   private def printCollectedDiffs(results: List[TestResult]): Unit = {
@@ -440,7 +690,9 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
   private def writeCaseReports(results: List[TestResult]): Unit = {
     val caseReports = results.map { result =>
-      val status = if (result.passed) "OK" else "DIFF"
+      val status = if (result.passed) "OK"
+        else if (result.successState == SuccessState.FAIL) "FAIL"
+        else "DIFF"
       // Store test name with suite prefix for proper review lookup
       val fullTestName = result.testName
       CaseReport(fullTestName, status, result.durationMs)
@@ -469,30 +721,13 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val suitePath = config.getSuitePath(fullClassName)
     val testCases = suite.testCases
 
-    // Step 1: Apply name filter, but include transitive dependencies.
-    // exactFilter: exact match (from path resolution like SuiteName/testCase)
-    // non-exact: contains match (from -t flag for grep-like convenience)
-    val filteredTests = config.testFilter match {
-      case Some(pattern) =>
-        val matched = if (config.exactFilter) {
-          testCases.filter(_.name == pattern).map(_.name).toSet
-        } else {
-          testCases.filter(_.name.contains(pattern)).map(_.name).toSet
-        }
-        val testMap = testCases.map(tc => tc.name -> tc).toMap
-        val needed = scala.collection.mutable.LinkedHashSet[String]()
-        def collectDeps(name: String): Unit = {
-          if (!needed.contains(name)) {
-            testMap.get(name).foreach { tc =>
-              tc.dependencies.foreach(collectDeps)
-            }
-            needed += name
-          }
-        }
-        matched.foreach(collectDeps)
-        testCases.filter(tc => needed.contains(tc.name))
-      case None => testCases
-    }
+    // Step 1: Apply name filter (see `matchedFilterNames` for exact vs
+    // substring semantics) and include only transitive deps that actually
+    // need to run. A dep with a fresh .bin cache is loaded by
+    // `resolveDependencyValue` at runtime instead of being re-executed;
+    // -r / --refresh-deps overrides that and forces every dep to re-run.
+    val filteredTests = expandSelectionWithMissingDeps(
+      testCases, suitePath, matchedFilterNames(testCases))
 
     // Step 2: Apply continue mode filter (if enabled)
     val testsToRun = if (config.continueMode) {
@@ -522,13 +757,15 @@ class TestRunner(config: RunConfig = RunConfig()) {
     } catch {
       case e: Exception =>
         out.println(s"Warning: beforeAll failed for $suiteName: ${e.getMessage}")
+        out.println(TestRunner.formatStackTrace(e))
     }
 
     val results = try {
       if (config.threads > 1) {
         runTestsParallel(testsToRun, fullClassName, suite)
       } else {
-        val sortedTests = resolveDependencyOrder(testsToRun)
+        val sortedTests = applyLocalityGrouping(
+          resolveDependencyOrder(testsToRun, suite.testCases.map(_.name).toSet))
         sortedTests.takeWhile(_ => !interactiveQuit).map(runTestCase(_, fullClassName, suite))
       }
     } finally {
@@ -538,6 +775,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       } catch {
         case e: Exception =>
           out.println(s"Warning: afterAll failed for $suiteName: ${e.getMessage}")
+          out.println(TestRunner.formatStackTrace(e))
       }
     }
 
@@ -662,7 +900,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
               out.println(diff)
               out.println()
             case None =>
-              out.println(s"  No snapshot found for test '${caseReport.testName}'")
+              out.println(s"  (new test, no snapshot yet)")
               out.println()
             case _ =>
               out.println()
@@ -671,7 +909,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
           // Interactive review for DIFF/FAIL tests
           if (config.interactive && !quit) {
             val isFailed = caseReport.result == "FAIL"
-            val response = SnapshotManager.interact(snapshotFile, outFile, logFile, isFailed)
+            val response = SnapshotManager.interact(snapshotFile, outFile, logFile, isFailed, caseReport.testName)
 
             response match {
               case InteractiveResponse.Accept =>
@@ -709,7 +947,57 @@ class TestRunner(config: RunConfig = RunConfig()) {
     else 0
   }
   
-  private def resolveDependencyOrder(testCases: List[TestCase]): List[TestCase] = {
+  /** Sequential-mode locality: after topological sort, group consecutive
+    * tests sharing a live-resource dep so a resource can stay alive across
+    * its consumers. Stable for tests with no live deps. */
+  private def applyLocalityGrouping(tests: List[TestCase]): List[TestCase] = {
+    if (!tests.exists(tc => tc.dependencies.exists(liveResources.isRegistered))) {
+      return tests
+    }
+    // Walk tests; whenever a test has live-resource deps, look ahead and
+    // pull other consumers of the SAME resource forward to be adjacent.
+    val remaining = scala.collection.mutable.ListBuffer[TestCase]()
+    remaining ++= tests
+    val out = scala.collection.mutable.ListBuffer[TestCase]()
+    while (remaining.nonEmpty) {
+      val tc = remaining.remove(0)
+      out += tc
+      val liveDeps = tc.dependencies.filter(liveResources.isRegistered).toSet
+      if (liveDeps.nonEmpty) {
+        val (similar, others) = remaining.toList.partition { other =>
+          other.dependencies.exists(liveDeps.contains)
+        }
+        remaining.clear()
+        remaining ++= similar
+        remaining ++= others
+      }
+    }
+    out.toList
+  }
+
+  /** Parallel-mode locality: rank ready tests so the scheduler submits the
+    * "best" candidate first. Higher score = should run sooner. */
+  private def localityScore(tc: TestCase): Int = {
+    val liveDeps = tc.dependencies.filter(liveResources.isRegistered)
+    if (liveDeps.isEmpty) 0
+    else {
+      val allAlive = liveDeps.forall(liveResources.isAlive)
+      val isLastConsumer = liveDeps.exists { dep =>
+        liveResources.isAlive(dep) && liveResources.pendingConsumerCount(dep) == 1
+      }
+      // 4 = alive + last consumer (drains a resource). Best.
+      // 3 = alive (locality). Good.
+      // 1 = needs to start a fresh resource. Worse than running an alive one.
+      if (isLastConsumer) 4
+      else if (allAlive) 3
+      else 1
+    }
+  }
+
+  private def resolveDependencyOrder(
+    testCases: List[TestCase],
+    knownTestNames: Set[String] = Set.empty
+  ): List[TestCase] = {
     val testMap = testCases.map(tc => tc.name -> tc).toMap
     val visited = scala.collection.mutable.Set[String]()
     val result = scala.collection.mutable.ListBuffer[TestCase]()
@@ -722,7 +1010,15 @@ class TestRunner(config: RunConfig = RunConfig()) {
             testCase.dependencies.foreach(visit)
             result += testCase
           case None =>
-            throw new IllegalArgumentException(s"Dependency '$testName' not found")
+            // Dep absent from `testMap` is fine when it's a live resource
+            // (materialized by LiveResourceManager) or a test that exists
+            // in the suite but was filtered out of this run because its
+            // .bin cache is fresh (`resolveDependencyValue` will load it
+            // from disk). Throw only for genuinely unknown names.
+            val isLive = liveResources.isRegistered(testName)
+            val isFilteredCachedTest = knownTestNames.contains(testName)
+            if (!isLive && !isFilteredCachedTest)
+              throw new IllegalArgumentException(s"Dependency '$testName' not found")
         }
       }
     }
@@ -761,12 +1057,41 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val schedulerThread = new Thread(() => {
       try {
         while (completed.size < testCases.size && schedulerError.isEmpty) {
-          // Find tests that are ready to run
+          // Find tests that are ready to run, then locality-rank them so
+          // the scheduler favors tests against already-alive resources
+          // (and tests that drain a resource).
+          //
+          // If the suite declares resourceLocks, force sequential order
+          // within it: don't submit a new test while any sibling is still
+          // in progress. Otherwise siblings race at the lock and the
+          // observed order becomes non-deterministic.
+          val suiteHasLocks =
+            suite != null && suite.getResourceLocks.nonEmpty
           val ready = schedulerLock.synchronized {
-            testCases.filter { tc =>
-              !completed.contains(tc.name) &&
-              !inProgress.contains(tc.name) &&
-              tc.dependencies.forall(dep => completed.contains(dep) || !testMap.contains(dep))
+            if (suiteHasLocks && inProgress.nonEmpty) Nil
+            else {
+              val readyUnranked = testCases.filter { tc =>
+                if (completed.contains(tc.name) || inProgress.contains(tc.name)) false
+                else {
+                  // A test is ready when every test producer it depends
+                  // on (directly or transitively through a live
+                  // resource's TestDep closure) has completed. Live
+                  // resources themselves don't appear in `testMap`;
+                  // their producer tests do, and those are what
+                  // constrain readiness. See `.ai/plan/task-graph.md`
+                  // Issue 1.
+                  val directTestDeps = tc.dependencies.filter(testMap.contains)
+                  val resourceTestDeps =
+                    liveResources.transitiveTestProducers(tc.dependencies)
+                  val producers = directTestDeps.toSet ++ resourceTestDeps
+                  producers.forall(completed.contains)
+                }
+              }
+              val ranked = readyUnranked.zipWithIndex
+                .sortBy { case (tc, idx) => (-localityScore(tc), idx) }
+                .map(_._1)
+              // When locked, only submit one at a time so order = test list order.
+              if (suiteHasLocks) ranked.take(1) else ranked
             }
           }
 
@@ -779,6 +1104,16 @@ class TestRunner(config: RunConfig = RunConfig()) {
                 inProgress += testCase.name
               }
 
+              // Trace: scheduler decided this test is ready. Producers
+              // is the producer-aware set the readiness predicate
+              // computed (Issue 1 Fix A).
+              val producers = (testCase.dependencies.filter(testMap.contains).toSet ++
+                liveResources.transitiveTestProducers(testCase.dependencies)).toList
+              val suitePathForTrace = config.getSuitePath(suiteName)
+              trace.emit(TraceEvent.SchedReady(
+                java.time.Instant.now(), TaskTrace.currentThread(),
+                s"$suitePathForTrace/${testCase.name}", producers))
+
               // Send "starting" message to main thread
               reportQueue.put(TestReportMessage.Starting(testCase.name, suiteName))
 
@@ -788,12 +1123,18 @@ class TestRunner(config: RunConfig = RunConfig()) {
                   val result = executeTestSilently(testCase, suiteName, suite)
                   reportQueue.put(TestReportMessage.Completed(testCase.name, result))
                 } catch {
-                  case e: Exception =>
+                  case NonFatal(rawErr) =>
+                    val e = TestRunner.unwrapInvocationTarget(rawErr)
+                    // Include the full stack trace — this path catches
+                    // booktest-internal failures (e.g. dependency-resolution
+                    // races); a one-line message hides the call site.
                     val errorResult = TestResult(
                       testName = s"${config.getSuitePath(suiteName)}/${testCase.name}",
                       passed = false,
                       output = "",
-                      diff = Some(s"Test '${testCase.name}' failed with exception: ${e.getMessage}"),
+                      diff = Some(
+                        s"Test '${testCase.name}' failed with exception: ${e.getMessage}\n" +
+                        TestRunner.formatStackTrace(e)),
                       durationMs = 0
                     )
                     reportQueue.put(TestReportMessage.Completed(testCase.name, errorResult))
@@ -937,19 +1278,28 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val logCapture = new LogCapture(testRun.logFile)
     logCapture.start()
 
+    var consumerFailed = false
+    var finalResult: Option[TestResult] = None
+
     try {
       // Setup
       if (suite != null) {
         try { suite.getSetup(testRun) }
-        catch { case e: Exception => testRun.iln(s"Setup failed: ${e.getMessage}") }
+        catch { case e: Exception =>
+          testRun.iln(s"Setup failed: ${e.getMessage}")
+          testRun.iln(TestRunner.formatStackTrace(e))
+        }
       }
 
       val returnValue = try {
-        executeTestWithDependencies(testCase, testRun, suitePath)
+        executeTestWithDependencies(testCase, testRun, suitePath, suite)
       } finally {
         if (suite != null) {
           try { suite.getTeardown(testRun) }
-          catch { case e: Exception => testRun.iln(s"Teardown failed: ${e.getMessage}") }
+          catch { case e: Exception =>
+            testRun.iln(s"Teardown failed: ${e.getMessage}")
+            testRun.iln(TestRunner.formatStackTrace(e))
+          }
         }
       }
 
@@ -961,6 +1311,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
       val result = if (testRun.isFailed) {
         val failMsg = testRun.failMessage.map(m => s": $m").getOrElse("")
+        consumerFailed = true
         snapshotResult.copy(
           testName = fullTestName,
           passed = false,
@@ -991,26 +1342,67 @@ class TestRunner(config: RunConfig = RunConfig()) {
       }
 
       // Store testRun reference for snapshot updates
-      result.copy(testRun = Some(testRun))
+      val finalised = attachTraceBlock(
+        result.copy(testRun = Some(testRun)),
+        testCase.dependencies)
+      finalResult = Some(finalised)
+      finalised
 
     } catch {
-      case e: Exception =>
+      case NonFatal(rawErr) =>
+        val e = TestRunner.unwrapInvocationTarget(rawErr)
+        consumerFailed = true
+        // Match the sequential-mode catch: write the full stack trace into
+        // the test's .md output so it ends up in the snapshot diff and in
+        // the .txt diff report. Without this, parallel-mode failures (the
+        // path most likely to surface races) lose the call site.
+        testRun.iln()
+        testRun.fail()
+        testRun.iln(s"test raised exception ${e.getClass.getName}: ${e.getMessage}")
+        testRun.iln(TestRunner.formatStackTrace(e))
         testRun.end()
         logCapture.stop()
         val endTime = System.currentTimeMillis()
         val duration = endTime - startTime
         testRun.writeReport(s"Test '${testCase.name}' FAILED: ${e.getMessage}\nDuration: ${duration}ms")
 
-        TestResult(
-          testName = fullTestName,
-          passed = false,
-          output = "",
-          diff = Some(s"Test '${testCase.name}' failed with exception: ${e.getMessage}"),
-          durationMs = duration
-        )
+        val errResult = attachTraceBlock(
+          TestResult(
+            testName = fullTestName,
+            passed = false,
+            output = "",
+            diff = Some(
+              s"Test '${testCase.name}' failed with exception: ${e.getMessage}\n" +
+              TestRunner.formatStackTrace(e)),
+            durationMs = duration),
+          testCase.dependencies)
+        finalResult = Some(errResult)
+        errResult
     } finally {
+      // Trace: this test ended. Emit before lock-release so the event
+      // shows up alongside the test's other events in the ring buffer.
+      finalResult.foreach { r =>
+        val resultKind =
+          if (r.passed) "ok"
+          else if (r.successState == SuccessState.FAIL) "fail"
+          else "diff"
+        trace.emit(TraceEvent.TaskEnd(
+          java.time.Instant.now(), TaskTrace.currentThread(),
+          fullTestName, resultKind, r.durationMs))
+      }
       // Release resource locks
       locks.foreach(lock => resourceManager.locks.release(lock))
+      // Release every transitively-reserved live resource for this
+      // consumer (in dep order — nested last). Direct dep gets the
+      // failure flag so SharedWithReset / invalidate-on-fail trigger;
+      // transitive nested deps don't need that signal.
+      val reach = liveResources.transitiveResourceClosure(testCase.dependencies)
+      val direct = testCase.dependencies.toSet
+      reach.foreach { name =>
+        liveResources.release(name, testCase.name,
+          failed = consumerFailed && direct.contains(name),
+          invalidateOnFail = config.invalidateLiveOnFail)
+      }
     }
   }
 
@@ -1019,6 +1411,54 @@ class TestRunner(config: RunConfig = RunConfig()) {
     result.testRun.foreach { testRun =>
       SnapshotManager.updateSnapshot(testRun)
     }
+  }
+
+  /** When a test fails or DIFFs under parallel execution, append a
+    * "Trace context" block to its `diff` field listing the trace events
+    * that touched this test and its transitive resources. This makes
+    * race-class failures (Issue 1, future Issue Ns) diagnosable from
+    * the end-of-run diff alone, with no need to re-run with `--trace`
+    * or eyeball thread IDs.
+    *
+    * The block is opt-out for sequential mode (no concurrency = no
+    * race-class confusion that the trace would clarify) but always
+    * attached at `-pN ≥ 2`.
+    *
+    * Events are pulled from the always-on `ringBuffer` for: the test
+    * itself, every live resource it transitively reaches, and every
+    * test producer in that resource closure. Sorted by timestamp so
+    * the reader sees the chronological order across worker threads. */
+  private def attachTraceBlock(r: TestResult, deps: Iterable[String]): TestResult = {
+    if (r.passed || config.threads <= 1) return r
+    val resources = liveResources.transitiveResourceClosure(deps)
+    val producers = liveResources.transitiveTestProducers(deps)
+    val producerKeys = producers.map { p =>
+      // testProducers returns short names; qualify with same suitePath
+      // as the consumer (producers must live in the same suite for
+      // booktest's current dep model).
+      val slash = r.testName.lastIndexOf('/')
+      if (slash > 0) s"${r.testName.substring(0, slash)}/$p" else p
+    }
+    val keys = (Set(r.testName) ++ resources ++ producerKeys).toList
+    val events = ringBuffer.snapshotMany(keys)
+    if (events.isEmpty) return r
+    val block = formatTraceBlock(r.testName, events)
+    val newDiff = r.diff match {
+      case Some(d) => Some(d + "\n\n" + block)
+      case None    => Some(block)
+    }
+    r.copy(diff = newDiff)
+  }
+
+  private def formatTraceBlock(forTask: String, events: List[TraceEvent]): String = {
+    val sb = new StringBuilder
+    sb.append(s"Trace context for $forTask (last ${events.size} events):\n")
+    sb.append("-" * 60).append('\n')
+    events.foreach { e =>
+      sb.append("  ").append(TraceEvent.render(e)).append('\n')
+    }
+    sb.append("-" * 60)
+    sb.toString
   }
 
   /** Print verbose output from a test result */
@@ -1035,43 +1475,144 @@ class TestRunner(config: RunConfig = RunConfig()) {
   }
 
   /** Load a dependency value from memory cache or bin file.
+    *
+    * Cache lookup precedence:
+    *   1. In-memory cache (populated by every successful test in this
+    *      run).
+    *   2. On-disk `.bin` from a *prior* invocation — but only when the
+    *      dep is **not** scheduled to run in the current invocation.
+    *      If the dep is scheduled, returning the on-disk value would
+    *      preempt the producer that's about to run with state from the
+    *      previous invocation; the caller should wait (or auto-run)
+    *      instead. This is Issue 1 Fix B from
+    *      `.ai/plan/task-graph.md`.
+    *
     * @param depName short dependency name (e.g., "createData")
     * @param suitePath suite path prefix (e.g., "examples/MethodRefTests")
     * @param testRun test run for bin file fallback
     */
   private def loadDependencyValue(depName: String, suitePath: String, testRun: TestCaseRun): Option[Any] = {
     val qualifiedKey = s"$suitePath/$depName"
-    // Try memory cache first (qualified key)
-    dependencyCache.get[Any](qualifiedKey).orElse {
-      // Fall back to loading from the dependency's bin file (same suite directory)
-      val depBinFile = testRun.outDir / s"$depName.bin"
-      if (os.exists(depBinFile)) {
-        try {
-          val serialized = os.read(depBinFile)
-          val result: Any = serialized.split(":", 2) match {
-            case Array("NULL", _) => null
-            case Array("UNIT", _) => ()
-            case Array("STRING", value) => value
-            case Array("INT", value) => value.toInt
-            case Array("LONG", value) => value.toLong
-            case Array("DOUBLE", value) => value.toDouble
-            case Array("BOOLEAN", value) => value.toBoolean
-            case Array("OBJECT", value) => value
-            case _ => serialized
+    val consumer = s"$suitePath/${testRun.testName}"
+    def emit(source: String, value: String): Unit =
+      trace.emit(TraceEvent.DepResolve(
+        java.time.Instant.now(), TaskTrace.currentThread(),
+        consumer, qualifiedKey, source, value))
+
+    dependencyCache.get[Any](qualifiedKey) match {
+      case Some(v) =>
+        emit("memory", String.valueOf(v))
+        Some(v)
+      case None =>
+        if (scheduledInThisRun.contains(qualifiedKey)) {
+          // Producer is scheduled in this run; refuse to serve a stale
+          // value from disk. Caller will either find the producer
+          // already completed on a retry, or auto-run it inline.
+          emit("miss-pending", "")
+          None
+        } else {
+          val depBinFile = testRun.outDir / s"$depName.bin"
+          if (os.exists(depBinFile)) {
+            try {
+              val serialized = os.read(depBinFile)
+              val result = testRun.deserializeCacheValue(serialized)
+              dependencyCache.put(qualifiedKey, result)
+              emit("bin", String.valueOf(result))
+              Some(result)
+            } catch {
+              case _: Exception =>
+                emit("bin-error", "")
+                None
+            }
+          } else {
+            emit("miss", "")
+            None
           }
-          // Cache in memory for subsequent lookups
-          dependencyCache.put(qualifiedKey, result)
-          Some(result)
-        } catch {
-          case _: Exception => None
+        }
+    }
+  }
+
+  /** Resolve a dependency value, auto-running the dependency if its cached value is missing.
+    * Like Python booktest, acts as a build system: dependencies are run on demand.
+    */
+  private def resolveDependencyValue(
+    depName: String, suitePath: String, testRun: TestCaseRun,
+    suiteName: String, suite: TestSuite
+  ): Any = {
+    val cached = loadDependencyValue(depName, suitePath, testRun)
+    if (config.verbose) {
+      out.println(s"    Dependency '$depName': ${cached.isDefined}")
+    }
+    cached.getOrElse {
+      // Auto-run missing dependency (build-system behavior, like Python booktest)
+      if (suite != null) {
+        val depTestCase = suite.testCases.find(_.name == depName)
+        depTestCase match {
+          case Some(depTC) =>
+            if (config.verbose) {
+              out.println(s"    Auto-running missing dependency '$depName'...")
+            }
+            val depResult = runTestCase(depTC, suiteName, suite)
+            if (depResult.passed || depResult.successState == SuccessState.DIFF) {
+              // Dependency ran - try loading its cached value
+              loadDependencyValue(depName, suitePath, testRun).getOrElse {
+                throw new IllegalStateException(
+                  s"Dependency '$depName' was auto-run but produced no cached value for test '${testRun.testName}'")
+              }
+            } else {
+              throw new IllegalStateException(
+                s"Dependency '$depName' failed when auto-run for test '${testRun.testName}'")
+            }
+          case None =>
+            throw new IllegalStateException(
+              s"Dependency '$depName' not found in suite for test '${testRun.testName}'")
         }
       } else {
-        None
+        throw new IllegalStateException(
+          s"Dependency '$depName' not found in cache for test '${testRun.testName}'")
       }
     }
   }
 
-  private def executeTestWithDependencies(testCase: TestCase, testRun: TestCaseRun, suitePath: String = ""): Any = {
+  /** Resolve a dep that belongs to a *live resource's* dep list (used as a
+    * callback by LiveResourceManager.acquire). The consumerTestName is the
+    * outermost consumer that triggered the resolution chain — needed so a
+    * nested resource that's Exclusive can give that consumer its own
+    * instance. */
+  private def resolveLiveDep(
+    dep: Dep[?], suitePath: String, testRun: TestCaseRun,
+    suiteName: String, suite: TestSuite, consumerTestName: String
+  ): Any = dep match {
+    case TestDep(ref) =>
+      resolveDependencyValue(ref.name, suitePath, testRun, suiteName, suite)
+    case ResourceDep(ref) =>
+      liveResources.acquire[Any](ref.name, consumerTestName,
+        d => resolveLiveDep(d, suitePath, testRun, suiteName, suite, consumerTestName))
+    case PoolDep(pool) =>
+      pool.acquire()
+    case CapacityDep(cap, amount) =>
+      cap.asInstanceOf[ResourceCapacity[Any]].acquire(amount.asInstanceOf[Any])
+      amount
+  }
+
+  /** Resolve a single dep name for a *consumer test*. Routes to
+    * LiveResourceManager if the name matches a registered live resource,
+    * otherwise falls back to the existing test-cache path. */
+  private def resolveConsumerDep(
+    depName: String, suitePath: String, testRun: TestCaseRun,
+    suiteName: String, suite: TestSuite, consumerTestName: String
+  ): Any = {
+    if (liveResources.isRegistered(depName)) {
+      liveResources.acquire[Any](depName, consumerTestName,
+        d => resolveLiveDep(d, suitePath, testRun, suiteName, suite, consumerTestName))
+    } else {
+      resolveDependencyValue(depName, suitePath, testRun, suiteName, suite)
+    }
+  }
+
+  private def executeTestWithDependencies(testCase: TestCase, testRun: TestCaseRun, suitePath: String = "", suite: TestSuite = null): Any = {
+    val suiteName = if (suite != null) suite.fullClassName else ""
+
     testCase.originalFunction match {
       case Some(function) =>
         // New API: Use the stored function with proper type-safe dependency injection
@@ -1084,13 +1625,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
             out.println(s"    Looking for dependencies: ${testCase.dependencies}")
           }
           val dependencyValues = testCase.dependencies.map { depName =>
-            val cached = loadDependencyValue(depName, suitePath, testRun)
-            if (config.verbose) {
-              out.println(s"    Dependency '$depName': ${cached.isDefined}")
-            }
-            cached.getOrElse {
-              throw new IllegalStateException(s"Dependency '$depName' not found in cache for test '${testCase.name}'")
-            }
+            resolveConsumerDep(depName, suitePath, testRun, suiteName, suite, testCase.name)
           }
 
           // Call the function with proper arguments based on number of dependencies
@@ -1122,13 +1657,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
                 out.println(s"    Looking for dependencies: ${testCase.dependencies}")
               }
               val dependencyValues = testCase.dependencies.map { depName =>
-                val cached = loadDependencyValue(depName, suitePath, testRun)
-                if (config.verbose) {
-                  out.println(s"    Dependency '$depName': ${cached.isDefined}")
-                }
-                cached.getOrElse {
-                  throw new IllegalStateException(s"Dependency '$depName' not found in cache for test '${testCase.name}'")
-                }
+                resolveConsumerDep(depName, suitePath, testRun, suiteName, suite, testCase.name)
               }
 
               // Create arguments array: TestCaseRun + dependency values

@@ -1,0 +1,2 @@
+booktest/test/TraceHappyHelper/state	OK	0
+booktest/test/TraceHappyHelper/consumer	OK	0

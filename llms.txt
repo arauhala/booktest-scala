@@ -1,0 +1,255 @@
+# Booktest-Scala — AI-Friendly Documentation
+
+> Booktest-Scala is a Scala port of [booktest](https://github.com/lumoa-oss/booktest).
+> Review-driven snapshot testing for data science, ML, and any system whose outputs
+> aren't strictly right or wrong but require expert review.
+
+## When to Use
+
+- ML model evaluation with tolerance metrics ("accuracy 0.92 ± 0.05 = OK")
+- LLM/AI output testing (non-deterministic; needs review, not pass/fail)
+- Data pipelines where "close enough" matters
+- Tests that produce rich output (tables, images, traces) better reviewed as markdown
+- Tests that share an expensive live service (DB, HTTP server, process)
+
+## Installation
+
+```scala
+libraryDependencies += "io.github.arauhala" %% "booktest-scala" % "0.4.1" % Test
+```
+
+Cross-compiled for Scala 2.12, 2.13, and 3.3.
+
+## Minimal Test
+
+```scala
+import booktest.*
+
+class MyTests extends TestSuite {
+  def testHello(t: TestCaseRun): Unit = {
+    t.h1("Hello")
+    t.tln("Hello, World!")  // tested against snapshot
+    t.iln("debug info")     // shown but not tested
+  }
+}
+```
+
+Run: `sbt 'Test/runMain booktest.BooktestMain my.MyTests'`. First run writes
+`books/my/MyTests/testHello.md` (the snapshot). Subsequent runs diff against it.
+
+## Test API
+
+`TestSuite` (extend this for your tests):
+
+| Method | Purpose |
+|---|---|
+| `def testFoo(t: TestCaseRun): T` | Method-style test (auto-discovered if name starts with `test`) |
+| `test(name)(body)` | Method-ref style test, returns `TestRef[T]` |
+| `test(name, dep1, dep2)(body)` | With type-safe dependencies (up to 3) |
+| `liveResource(name, deps...)(build)` | Shared `AutoCloseable` across consumers (concurrent readers) |
+| `liveResourceSerialized(name, deps...)(build)` | Shared, but consumers run one at a time (no reset) |
+| `exclusiveResource(name, deps...)(build)` | Per-consumer instance |
+| `liveResourceWithReset(name, deps...)(build)(reset)` | Shared, serialized, reset between consumers |
+| `capacity(name, total)` | Numeric budget (RAM, CPU shares) |
+| `setup(t)` / `teardown(t)` | Per-test hooks (override) |
+| `beforeAll()` / `afterAll()` | Per-suite hooks (override) |
+| `resourceLocks: List[String]` | Override to serialize tests within suite (parallel mode) |
+| `mark(testName, markers*)` | Tag a test (slow, flaky, gpu, etc.) |
+| `resources: ResourceManager` | Access to port pool, lock pool, capacities |
+
+`TestCaseRun` (the `t:` parameter; what you call inside a test):
+
+**Output (tested against snapshot)**:
+- `t(text)` / `tln(text)` — tested content
+- `h1`/`h2`/`h3`/`h4`/`h5(title)` — headers (anchor-seeking)
+- `key(label, value)` — labeled value as test line
+- `tmetric(label, value, tolerance, direction)` — metric with absolute tolerance, direction = `Some("min")` or `Some("max")` for regression detection
+- `tmetricPct(label, value, tolerancePct, direction)` — percentage tolerance
+- `tLongLn(value, unit, max, tolerance)` / `tDoubleLn(...)` — value with unit/limit/tolerance
+- `ttable(headers, rows)` / `ttable(map)` / `ttable(caseClassSeq)` — markdown tables
+- `timage(file, caption)` — image (hashed, stored in assets dir, referenced in snapshot)
+- `tUsPerOpLn(opCount, label)(block)` — time block, output µs/op as test line
+
+**Output (info — written to the same `.md` snapshot but not test-fail-on-diff)**:
+- `i(text)` / `iln(text)` — info content; mismatches surface as cyan `.` info-diffs (don't fail)
+- `imetric(label, value)` — info metric (no tolerance check)
+- `itable(...)` / `iimage(file, caption)` — info versions
+- `iMsLn(block)` — execute block, log elapsed ms as info, return result
+- `iUsPerOpLn(opCount, label)(block)` — info µs/op
+- Token alignment between `t` and `i` is per-token, so a length-changing
+  info value (e.g. `"7ms"` vs `"0ms"`) does NOT cascade into a diff on
+  neighboring `t` content.
+
+**Failure**:
+- `f(text)` / `fln(text)` — fail content (always marks test failed)
+- `fail()` / `fail(message)` — mark test failed without throwing
+- `assertln(condition)` / `assertln(condition, message)` — assert; `iln("ok")` on success, `fln(message)` on failure (NO exception)
+- `diff()` — mark current line as diff
+
+**Caching & dependencies**:
+- `snapshot[T](name, args*)(compute)` — cache expensive computation, auto-invalidate on arg hash change
+- Test return value is auto-cached to `<test>.bin` for dep injection
+- `hasSnapshot(name, args*)`, `invalidateSnapshot(name)`, `invalidateAllSnapshots()`
+- Build-system semantics: filtered runs (`-t pat`) re-run a transitive dep ONLY if it matches the filter, its `.bin` is missing, or `-r`/`--refresh-deps` is set; otherwise the cached value loads from `.bin` (Python booktest parity)
+
+**Async**:
+- `await(future, timeout)` — await with default infinite timeout
+- `async { ec => ... }` — run with test's `ExecutionContext`
+- `executionContext: ExecutionContext` — cached thread pool
+
+**File management**:
+- `file(name)` — File in test assets dir (`books/<suite>/<test>/<name>`)
+- `tmpFile(name)` / `tmpDir(name)` / `tmpPath(name)` — under `books/.out/<suite>/<test>/`; cleared on re-run; supports `"/"` for nested paths
+- `clearTmpDir()` — explicit clear
+
+**Review workflow** (AI-assisted batch review):
+- `startReview()` — begin a review section (header written)
+- `reviewln(label, value, passed=None)` — add review item; `passed=None` means needs human review
+- `reviewln(label, condition: Boolean)` — shorthand
+- `endReview(): Boolean` — true if all items passed/accepted
+
+**Resource access**:
+- `acquirePort()` / `releasePort(port)` / `withPort(block)` — port pool
+
+**Snapshot navigation (advanced)**:
+- `anchor(prefix)` / `anchorln(line)` — seek snapshot to prefix/line, then write as tested content
+- `seek(predicate)` / `seekLine(line)` / `seekPrefix(prefix)` / `jump(lineNo)` — manual cursor control
+- `peekDouble` / `peekLong` / `peekToken` / `skipToken` — inspect next snapshot token without consuming
+
+## Live Resources (v0.4.0+)
+
+Share an expensive `AutoCloseable` across many tests. Built once on first
+consumer, closed when last consumer finishes; pool/capacity allocations
+held for the resource's lifetime.
+
+```scala
+class StringServer(port: Int, payload: String) extends AutoCloseable { /* ... */ }
+
+class ServerTests extends TestSuite {
+  val state = test("createState") { (t: TestCaseRun) => "hello"; }
+
+  val server: ResourceRef[StringServer] =
+    liveResource("server", state, resources.ports) {
+      (s: String, port: Int) => new StringServer(port, s)
+    }
+
+  test("clientGet", server) { (t: TestCaseRun, http: StringServer) =>
+    t.tln(s"GET -> ${http.get("/echo")}")
+  }
+}
+```
+
+Sharing modes: `liveResource` (shared, concurrent readers; default) | `liveResourceSerialized` (shared, one consumer at a time, no reset) | `liveResourceWithReset(...)(...)(reset)` (shared, serialized, reset between consumers) | `exclusiveResource` (per-consumer instance).
+Dep types in the dep list: `TestRef[T]` | `ResourceRef[T]` | `ResourcePool[T]` | `ResourceCapacity[N].reserve(amount)`.
+
+**Lifecycle is runner-managed.** Pre-pass refcount-reservation → first
+acquire builds (resolves deps, acquires pool/capacity slots) → consumers
+borrow under share-mode rules → last release closes (and returns
+pool/capacity allocations) → end-of-run `shutdownAll` force-closes any
+stragglers. Build runs once on the first consumer's thread under a
+per-resource build lock; close runs inline on the last releaser's thread.
+
+**Consumer contract: do not call `.close()` on an injected handle.**
+The `T <: AutoCloseable` bound exists for the runner, not for tests.
+A consumer that closes its handle (often via Scala's `using { ... }`)
+tears the instance down for every later consumer and corrupts their
+snapshots silently. If a test genuinely needs to own its instance,
+use `exclusiveResource(...)` instead.
+
+`PortPool` (used by `resources.ports`): rotates issued ports rather than
+sticking to the lowest free one, and applies a kernel-settle cooldown
+between release and re-issue (default 250ms). Override via
+`BOOKTEST_PORT_COOLDOWN_MS` env var. Range via `BOOKTEST_PORT_BASE` /
+`BOOKTEST_PORT_MAX` (default 10000–60000).
+
+Capacity: `val ram = capacity("ram", 4096.0)`; override via `BOOKTEST_CAPACITY_RAM=8192` or `--capacity ram=8192`.
+
+## CLI
+
+```bash
+sbt 'Test/runMain booktest.BooktestMain [flags] [test classes / groups]'
+```
+
+| Flag | Effect |
+|---|---|
+| `-v, --verbose` | Verbose output (lifecycle events, test content) |
+| `-i, --interactive` | Interactive accept/reject of changed snapshots |
+| `-l, --list` | List discovered tests |
+| `-L, --logs` | Show captured stdout/stderr |
+| `-w, --review` | Re-show diffs from previous run without executing |
+| `-pN` | Parallel execution with N threads (e.g. `-p4`) |
+| `-c, --continue` | Skip tests that passed last run |
+| `-r, --refresh-deps` | Force re-run of transitive deps (default: load cached deps from `.bin`) |
+| `-t PATTERN` | Filter tests by substring (transitive deps still included) |
+| `-S, --recapture` | Force regenerate ALL snapshots |
+| `-s, --update` | Auto-accept snapshot changes (DIFF and FAIL) |
+| `-a, --accept` | Auto-accept DIFF tests only (not FAIL) |
+| `--batch-review` | Sequential interactive review of all failures at end |
+| `--tree` | Hierarchical tree display (with `-l`) |
+| `--inline` | Show diffs inline during execution (default: at end) |
+| `--diff-style STYLE` | `unified` (default), `side-by-side`, `inline`, `minimal` |
+| `--output-dir DIR` / `--snapshot-dir DIR` | Override default `books/` |
+| `--root PREFIX` | Override `root` from `booktest.ini` |
+| `--garbage` | List orphan files in `books/` |
+| `--clean` | Delete orphan files and tmp dirs |
+| `--invalidate-live-on-fail` | Force-close shared live resources on consumer failure |
+| `--capacity NAME=VALUE` | Override a `capacity(NAME, _)` total |
+| `-h, --help` | Show help |
+
+## Configuration (`booktest.ini`)
+
+Searched upward from current directory.
+
+```ini
+root = booktest             # Package prefix to strip from test paths
+default = examples, test    # Default group(s) when no args
+all = test, examples        # Named group: test classes are looked up under it
+exclude = FailingTest, MultiFail   # Suite name substrings to skip in default runs
+books-path = books          # Snapshot directory
+```
+
+## Environment Variables
+
+- `BOOKTEST_PORT_BASE` — port pool base (default 10000)
+- `BOOKTEST_PORT_MAX` — port pool max (default 60000)
+- `BOOKTEST_CAPACITY_<NAME>` — override `capacity(name, _)` total (uppercase)
+
+## File Layout
+
+```
+books/
+├── .out/                      # gitignored — runtime artifacts
+│   └── <suite>/
+│       ├── <test>.bin         # cached return value (for deps)
+│       ├── <test>.md          # raw captured output (compared against snapshot)
+│       ├── <test>.log         # captured stdout/stderr
+│       ├── <test>.txt         # per-line diff report (?/./! markers, side-by-side) + status — match Python booktest. CI artifact viewers should land here for a flagged DIFF.
+│       └── <test>/            # tmpDir for the test
+├── <suite>/
+│   ├── <test>.md              # COMMITTED snapshot (the spec)
+│   └── <test>/                # COMMITTED assets (images etc.)
+└── cases.ndjson               # last-run results (continue mode)
+```
+
+## Workflow
+
+1. Write a test producing markdown via `t.tln(...)` etc.
+2. Run — first time, snapshot is missing → DIFF.
+3. Inspect output. Use `-i` to accept, or `-s` to bulk-accept.
+4. Snapshot files are committed to git as the spec.
+5. Future runs diff against snapshot. Real changes show up as DIFF.
+6. Use `-w` to re-review diffs without re-executing.
+
+## Documentation
+
+- `README.md` — overview + quick start
+- `USAGE.md` — full API reference and examples
+- `CLAUDE.md` — codebase guide for contributors and coding agents
+- `CHANGELOG.md` — release history
+- `.ai/plan/live-resources.md` + `live-resources-example.md` — design docs for v0.4.0
+
+## Original Python Booktest
+
+Concept and design: https://github.com/lumoa-oss/booktest. This Scala port
+follows the Python API and snapshot format closely; differences are
+documented in `CLAUDE.md` and `CHANGELOG.md`.

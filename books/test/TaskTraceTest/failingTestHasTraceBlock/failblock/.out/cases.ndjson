@@ -1,0 +1,2 @@
+{"name":"booktest/test/TraceFailHelper/state","result":"DIFF","duration_ms":0}
+{"name":"booktest/test/TraceFailHelper/consumer","result":"FAIL","duration_ms":1}

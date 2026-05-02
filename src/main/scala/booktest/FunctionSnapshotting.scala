@@ -32,15 +32,20 @@ case class FunctionCallSnapshot[T](
   result: T
 )
 
+/** Per-test function-snapshot manager. Like EnvSnapshotManager, the maps
+  * here are guarded by `lock` so a test that genuinely fans out to multiple
+  * threads (or that exposes `snapshotFunction` to a thread pool) won't lose
+  * captured calls or trip ConcurrentModificationException. */
 class FunctionSnapshotManager(testCaseRun: TestCaseRun) {
-  
+
   private val snapshotDir = testCaseRun.outDir / "_snapshots"
   private val snapshotFile = snapshotDir / "functions.json"
-  
+
+  private val lock = new Object
   private var snapshots: Map[String, String] = loadSnapshots() // hash -> serialized result
-  private var capturedCalls: mutable.Map[String, (FunctionCall, String)] = mutable.Map.empty
-  private var runtimeCache: mutable.Map[String, Any] = mutable.Map.empty // runtime cache for actual values
-  
+  private val capturedCalls: mutable.Map[String, (FunctionCall, String)] = mutable.Map.empty
+  private val runtimeCache: mutable.Map[String, Any] = mutable.Map.empty // runtime cache for actual values
+
   private def loadSnapshots(): Map[String, String] = {
     if (os.exists(snapshotFile)) {
       try {
@@ -58,61 +63,67 @@ class FunctionSnapshotManager(testCaseRun: TestCaseRun) {
       Map.empty
     }
   }
-  
+
   private def saveSnapshots(): Unit = {
-    if (capturedCalls.nonEmpty) {
-      os.makeDir.all(snapshotDir)
-      val allSnapshots = snapshots ++ capturedCalls.values.map { case (call, result) =>
+    val allSnapshots = lock.synchronized {
+      if (capturedCalls.isEmpty) None
+      else Some(snapshots ++ capturedCalls.values.map { case (call, result) =>
         call.hash -> result
-      }.toMap
-      
-      val json = ujson.Obj.from(allSnapshots.map { case (hash, result) =>
+      }.toMap)
+    }
+    allSnapshots.foreach { all =>
+      os.makeDir.all(snapshotDir)
+      val json = ujson.Obj.from(all.map { case (hash, result) =>
         hash -> ujson.Str(result)
       })
       os.write.over(snapshotFile, ujson.write(json, indent = 2))
     }
   }
-  
+
   def snapshotFunction[T](functionName: String, actualFunction: () => T, args: Any*): T = {
     val call = FunctionCall.fromCall(functionName, args: _*)
-    
-    // Check runtime cache first
-    runtimeCache.get(call.hash) match {
+
+    // Fast path: cached result from a previous call in this run.
+    val cached = lock.synchronized(runtimeCache.get(call.hash))
+    cached match {
       case Some(cachedValue) =>
         testCaseRun.i(s"Using cached result for $functionName")
         cachedValue.asInstanceOf[T]
-        
+
       case None =>
         // Check if we have a snapshot (even if we can't deserialize it, we know the call was made)
-        val hasSnapshot = snapshots.contains(call.hash)
-        
-        // Execute function 
+        val hasSnapshot = lock.synchronized(snapshots.contains(call.hash))
+
+        // Run user function OUTSIDE the lock — it can be slow / re-entrant.
         val result = actualFunction()
-        
-        // Cache the actual result in runtime
-        runtimeCache(call.hash) = result
-        
-        // Store serialized version for persistence
-        val serializedResult = result.toString
-        capturedCalls(call.hash) = (call, serializedResult)
-        
-        if (hasSnapshot) {
-          testCaseRun.i(s"Re-executed $functionName (snapshot exists)")
+
+        lock.synchronized {
+          // If a concurrent call beat us to it, prefer their value to keep
+          // the snapshot deterministic (first-writer-wins).
+          runtimeCache.get(call.hash) match {
+            case Some(existing) => existing.asInstanceOf[T]
+            case None =>
+              runtimeCache(call.hash) = result
+              capturedCalls(call.hash) = (call, result.toString)
+              if (hasSnapshot) {
+                testCaseRun.i(s"Re-executed $functionName (snapshot exists)")
+              }
+              result
+          }
         }
-        
-        result
     }
   }
-  
+
   def logSnapshots(): Unit = {
-    if (capturedCalls.nonEmpty) {
+    val captured = lock.synchronized(capturedCalls.toMap)
+    if (captured.nonEmpty) {
       testCaseRun.h1("Function Call Snapshots")
-      capturedCalls.values.toSeq.sortBy(_._1.functionName).foreach { case (call, result) =>
+      captured.values.toSeq.sortBy(_._1.functionName).foreach { case (call, result) =>
         testCaseRun.tln(s"${call.functionName}(${call.args.mkString(", ")}) -> ${result.take(50)}${if (result.length > 50) "..." else ""}")
       }
     }
   }
-  
+
   def close(): Unit = {
     saveSnapshots()
     logSnapshots()
@@ -121,21 +132,23 @@ class FunctionSnapshotManager(testCaseRun: TestCaseRun) {
 
 // Simple function mocking utility
 class FunctionMocker {
-  private var originalFunctions: mutable.Map[String, () => Any] = mutable.Map.empty
-  private var mockFunctions: mutable.Map[String, () => Any] = mutable.Map.empty
-  
-  def mockFunction[T](name: String, mockImpl: () => T): Unit = {
+  private val lock = new Object
+  private val originalFunctions: mutable.Map[String, () => Any] = mutable.Map.empty
+  private val mockFunctions: mutable.Map[String, () => Any] = mutable.Map.empty
+
+  def mockFunction[T](name: String, mockImpl: () => T): Unit = lock.synchronized {
     mockFunctions(name) = mockImpl.asInstanceOf[() => Any]
   }
-  
+
   def callFunction[T](name: String, defaultImpl: () => T): T = {
-    mockFunctions.get(name) match {
-      case Some(mock) => mock().asInstanceOf[T]
+    val mock = lock.synchronized(mockFunctions.get(name))
+    mock match {
+      case Some(m) => m().asInstanceOf[T]
       case None => defaultImpl()
     }
   }
-  
-  def clearMocks(): Unit = {
+
+  def clearMocks(): Unit = lock.synchronized {
     mockFunctions.clear()
   }
 }

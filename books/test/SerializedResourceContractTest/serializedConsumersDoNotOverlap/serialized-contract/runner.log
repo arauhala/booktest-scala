@@ -1,0 +1,25 @@
+
+# test results:
+
+  booktest/test/SerializedContractHelper/c4..[93mDIFF[39m 43 ms
+  booktest/test/SerializedContractHelper/c2..[93mDIFF[39m 98 ms
+  booktest/test/SerializedContractHelper/c1..[93mDIFF[39m 141 ms
+  booktest/test/SerializedContractHelper/c3..[93mDIFF[39m 183 ms
+
+============================================================
+[91m# 4 test(s) with differences:[39m
+============================================================
+
+[93m## booktest/test/SerializedContractHelper/c4[39m
+----------------------------------------
+
+[93m## booktest/test/SerializedContractHelper/c2[39m
+----------------------------------------
+
+[93m## booktest/test/SerializedContractHelper/c1[39m
+----------------------------------------
+
+[93m## booktest/test/SerializedContractHelper/c3[39m
+----------------------------------------
+
+============================================================

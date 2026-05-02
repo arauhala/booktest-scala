@@ -304,7 +304,15 @@ class TestCaseRun(
         case i: Int => s"INT:$i"
         case l: Long => s"LONG:$l"
         case d: Double => s"DOUBLE:$d"
+        case f: Float => s"FLOAT:$f"
         case b: Boolean => s"BOOLEAN:$b"
+        case s: java.io.Serializable =>
+          // Use Java serialization for complex types (like Python's pickle)
+          val baos = new java.io.ByteArrayOutputStream()
+          val oos = new java.io.ObjectOutputStream(baos)
+          oos.writeObject(s)
+          oos.close()
+          s"SERIALIZED:${java.util.Base64.getEncoder.encodeToString(baos.toByteArray)}"
         case other => s"OBJECT:${other.toString}"
       }
       os.write.over(binFile, serialized)
@@ -324,19 +332,7 @@ class TestCaseRun(
   def loadReturnValue[T]: Option[T] = {
     try {
       if (os.exists(binFile)) {
-        val serialized = os.read(binFile)
-        val result: Any = serialized.split(":", 2) match {
-          case Array("NULL", _) => null
-          case Array("UNIT", _) => ()
-          case Array("STRING", value) => value
-          case Array("INT", value) => value.toInt
-          case Array("LONG", value) => value.toLong
-          case Array("DOUBLE", value) => value.toDouble
-          case Array("BOOLEAN", value) => value.toBoolean
-          case Array("OBJECT", value) => value
-          case _ => serialized
-        }
-        Some(result.asInstanceOf[T])
+        Some(deserializeCacheValue(os.read(binFile)).asInstanceOf[T])
       } else {
         None
       }
@@ -1334,9 +1330,19 @@ class TestCaseRun(
     // If started, output was written incrementally — nothing to do
   }
   
+  /** Write the per-test `<test>.txt` report — mirrors Python booktest's
+    * `<name>.txt`. Contains the full per-line diff report (every committed
+    * line with `?` / `.` / `!` markers and side-by-side expected) plus the
+    * caller-supplied status/duration line at the end.
+    *
+    * Without this, CI artifact viewers that point at `<test>.txt` saw only
+    * a one-line "completed in Xms" summary and humans had to dig into the
+    * `<test>.md` capture to understand a flagged DIFF. */
   def writeReport(message: String): Unit = {
     os.makeDir.all(reportFile / os.up)
-    os.write.over(reportFile, message)
+    val body = if (diffReportBuffer.isEmpty) message
+               else s"${diffReportBuffer.toString}\n$message"
+    os.write.over(reportFile, body)
   }
   
   def acceptSnapshot(): Unit = {
@@ -1377,5 +1383,28 @@ class TestCaseRun(
   def withPort[T](block: Int => T): T = resourceManager match {
     case Some(rm) => rm.ports.use(block)
     case None => throw new IllegalStateException("No ResourceManager configured - cannot acquire port")
+  }
+
+  /** Deserialize a cached value from its string representation */
+  private[booktest] def deserializeCacheValue(serialized: String): Any = {
+    serialized.split(":", 2) match {
+      case Array("NULL", _) => null
+      case Array("UNIT", _) => ()
+      case Array("STRING", value) => value
+      case Array("INT", value) => value.toInt
+      case Array("LONG", value) => value.toLong
+      case Array("DOUBLE", value) => value.toDouble
+      case Array("FLOAT", value) => value.toFloat
+      case Array("BOOLEAN", value) => value.toBoolean
+      case Array("SERIALIZED", base64) =>
+        val bytes = java.util.Base64.getDecoder.decode(base64)
+        val bais = new java.io.ByteArrayInputStream(bytes)
+        val ois = new java.io.ObjectInputStream(bais)
+        val result = ois.readObject()
+        ois.close()
+        result
+      case Array("OBJECT", value) => value
+      case _ => serialized
+    }
   }
 }

@@ -23,11 +23,17 @@ object BooktestMain {
     var summaryMode = true // Python-style: diffs at end (default)
     var recaptureAll = false  // -S: force regenerate all snapshots
     var updateSnapshots = false  // -s: auto-accept snapshot changes
+    var autoAcceptDiff = false  // -a: auto-accept DIFF tests (not FAIL)
     var continueMode = false  // -c: continue from last run, skip successful tests
+    var refreshDeps = false  // -r: force re-run of transitive deps (default: load from .bin if present)
     var threads = 1  // -p N: number of threads for parallel execution
     var garbageMode = false  // --garbage: list orphan files
     var cleanMode = false  // --clean: remove orphan files and temp directories
     var rootOverride: Option[String] = None  // --root: package prefix to strip from paths
+    var invalidateLiveOnFail = false  // --invalidate-live-on-fail
+    var traceFlag = sys.env.contains("BOOKTEST_TRACE")  // --trace / BOOKTEST_TRACE=1
+    var buildGraphMode = false  // -b / --build-graph: print task DAG with state
+    var capacityOverrides = Map.empty[String, Double]  // --capacity name=value
     val testClasses = scala.collection.mutable.ListBuffer[String]()
     
     var i = 0
@@ -43,9 +49,26 @@ object BooktestMain {
         case "--inline" => summaryMode = false  // Show diffs inline (old behavior)
         case "-S" | "--recapture" => recaptureAll = true  // Force regenerate all snapshots
         case "-s" | "--update" => updateSnapshots = true  // Auto-accept changes
+        case "-a" | "--accept" => autoAcceptDiff = true  // Auto-accept DIFF tests
         case "-c" | "--continue" => continueMode = true  // Continue from last run
+        case "-r" | "--refresh-deps" => refreshDeps = true  // Force re-run of transitive deps
         case "--garbage" => garbageMode = true  // List orphan files in books/
         case "--clean" => cleanMode = true  // Remove orphan files and .tmp directories
+        case "--invalidate-live-on-fail" => invalidateLiveOnFail = true
+        case "--trace" => traceFlag = true
+        case "-b" | "--build-graph" => buildGraphMode = true
+        case "--capacity" =>
+          i += 1
+          if (i < args.length) {
+            args(i).split("=", 2) match {
+              case Array(name, value) =>
+                try capacityOverrides = capacityOverrides + (name -> value.toDouble)
+                catch { case _: NumberFormatException =>
+                  println(s"Invalid --capacity value: ${args(i)}")
+                }
+              case _ => println(s"Invalid --capacity format (expected name=value): ${args(i)}")
+            }
+          }
         case "-p" =>
           i += 1
           if (i < args.length) {
@@ -128,10 +151,20 @@ object BooktestMain {
       summaryMode = summaryMode,
       recaptureAll = recaptureAll,
       updateSnapshots = updateSnapshots,
+      autoAcceptDiff = autoAcceptDiff,
       continueMode = continueMode,
+      refreshDeps = refreshDeps,
       threads = threads,
-      booktestConfig = booktestConfig
+      booktestConfig = booktestConfig,
+      invalidateLiveOnFail = invalidateLiveOnFail,
+      trace = traceFlag
     )
+
+    // Apply capacity overrides from CLI to the global ResourceManager.
+    // capacity(name, default) reads this map.
+    capacityOverrides.foreach { case (name, value) =>
+      ResourceManager.default.setCapacityOverride(name, value)
+    }
 
     // Resolve test suites - paths are relative to root namespace
     val suites: List[TestSuite] = if (testClasses.isEmpty) {
@@ -224,6 +257,11 @@ object BooktestMain {
       } else {
         displayTestsAsList(suites, config, testClasses.toList)
       }
+      return
+    }
+
+    if (buildGraphMode) {
+      displayBuildGraph(suites, config)
       return
     }
     
@@ -451,6 +489,113 @@ object BooktestMain {
   }
   
   
+  /** Print the cross-suite task DAG (tests + live resources) annotated
+    * with each task's last-run state, drawn from `<outputDir>/.out`'s
+    * cases.ndjson and `.bin` cache. Live resources don't persist
+    * cross-run state, so they're shown with their declared share mode
+    * and the names of their deps.
+    *
+    * Style: one suite per "## " block, tasks listed in topological
+    * order so producers come before consumers, deps drawn as `←`
+    * arrows under each task. */
+  private def displayBuildGraph(suites: List[TestSuite], config: RunConfig): Unit = {
+    import fansi.Color.{LightBlue, LightGreen, LightRed, LightYellow, LightCyan}
+    import fansi.Bold
+
+    val outDir = config.outputDir / ".out"
+    // Last-run case reports keyed by full test name ("suitePath/testName").
+    val reportByName: Map[String, CaseReport] =
+      try {
+        val cases = CaseReports.fromDir(outDir).cases
+        cases.map(c => c.testName -> c).toMap
+      } catch { case _: Throwable => Map.empty }
+
+    def stateBadge(testKey: String): fansi.Str = reportByName.get(testKey) match {
+      case Some(r) if r.result == "OK"   => LightGreen(f"ok    ${r.durationMs}%5d ms")
+      case Some(r) if r.result == "DIFF" => LightYellow(f"DIFF  ${r.durationMs}%5d ms")
+      case Some(r) if r.result == "FAIL" => LightRed(f"FAIL  ${r.durationMs}%5d ms")
+      case Some(r)                       => fansi.Color.White(f"${r.result}%-5s ${r.durationMs}%5d ms")
+      case None                          => fansi.Color.DarkGray("(not run)         ")
+    }
+
+    suites.foreach { suite =>
+      val suitePath = config.booktestConfig.classNameToPath(suite.fullClassName)
+      val testCases = suite.testCases
+      val filtered = config.testFilter match {
+        case Some(pattern) =>
+          val matched = testCases.filter(_.name.contains(pattern)).map(_.name).toSet
+          val testMap = testCases.map(tc => tc.name -> tc).toMap
+          val needed = scala.collection.mutable.LinkedHashSet[String]()
+          def collect(name: String): Unit = if (!needed.contains(name)) {
+            testMap.get(name).foreach(_.dependencies.foreach(collect))
+            needed += name
+          }
+          matched.foreach(collect)
+          testCases.filter(tc => needed.contains(tc.name))
+        case None => testCases
+      }
+
+      if (filtered.isEmpty && suite.liveResources.isEmpty) {
+        // skip empty suite
+      } else {
+        println()
+        println(s"${LightBlue("##")} ${Bold.On(suitePath)}")
+        println()
+
+        // Live resources first (they're often producers of state for
+        // tests). Then tests in topological order.
+        val resourceNames = suite.liveResources.map(_.name).toSet
+        suite.liveResources.foreach { lr =>
+          val mode = lr.shareMode match {
+            case ShareMode.SharedReadOnly => "shared"
+            case ShareMode.SharedSerialized => "serialized"
+            case _: ShareMode.SharedWithReset[_] => "with-reset"
+            case ShareMode.Exclusive => "exclusive"
+          }
+          val depNames = lr.deps.map {
+            case TestDep(ref) => ref.name
+            case ResourceDep(ref) => ref.name
+            case PoolDep(_) => "<pool>"
+            case CapacityDep(_, _) => "<capacity>"
+          }
+          val depStr = if (depNames.isEmpty) "" else " ← " + depNames.mkString(", ")
+          println(s"  ${LightCyan("●")} ${Bold.On(lr.name)}  ${fansi.Color.DarkGray(s"(live: $mode)")}$depStr")
+        }
+        if (suite.liveResources.nonEmpty && filtered.nonEmpty) println()
+
+        val ordered = topologicalSort(filtered)
+        ordered.foreach { tc =>
+          val key = s"$suitePath/${tc.name}"
+          val state = stateBadge(key)
+          val deps = tc.dependencies
+          val depStr = if (deps.isEmpty) ""
+            else {
+              val annotated = deps.map { d =>
+                if (resourceNames.contains(d)) s"${LightCyan(d)}"
+                else d
+              }
+              " ← " + annotated.mkString(", ")
+            }
+          println(s"  ${LightYellow("○")} ${Bold.On(tc.name)}  $state$depStr")
+        }
+
+        // Per-suite summary line.
+        val total = filtered.size
+        val ok = filtered.count(tc => reportByName.get(s"$suitePath/${tc.name}").exists(_.result == "OK"))
+        val diff = filtered.count(tc => reportByName.get(s"$suitePath/${tc.name}").exists(_.result == "DIFF"))
+        val fail = filtered.count(tc => reportByName.get(s"$suitePath/${tc.name}").exists(_.result == "FAIL"))
+        val never = total - ok - diff - fail
+        println()
+        println(s"  ${fansi.Color.DarkGray(s"$total tasks: $ok ok, $diff diff, $fail fail, $never not-run")}")
+      }
+    }
+    println()
+    if (reportByName.isEmpty) {
+      println(fansi.Color.DarkGray("(no prior run found at " + outDir + " — all tasks marked not-run)"))
+      println()
+    }
+  }
+
   private def topologicalSort(testCases: List[TestCase]): List[TestCase] = {
     val testCaseMap = testCases.map(tc => tc.name -> tc).toMap
     val graph = testCases.map(tc => tc.name -> tc.dependencies).toMap
@@ -514,6 +659,9 @@ object BooktestMain {
     println("  -v, --verbose       Verbose output")
     println("  -i, --interactive   Interactive mode")
     println("  -l, --list          List test classes and individual test paths")
+    println("  -b, --build-graph   Print the task DAG (tests + live resources) annotated")
+    println("                      with each task's last-run state (ok/DIFF/FAIL/not-run)")
+    println("                      and dep edges. Reads <output-dir>/.out/cases.ndjson.")
     println("  -L, --logs          Show logs")
     println("  -w, --review        Review previous test results")
     println("  --batch-review      Review multiple failed tests in sequence")
@@ -522,6 +670,8 @@ object BooktestMain {
     println("  -s, --update        Auto-accept snapshot changes (update mode)")
     println("  -S, --recapture     Force regenerate all snapshots")
     println("  -c, --continue      Continue from last run, skip successful tests")
+    println("  -r, --refresh-deps  Force re-run of transitive dependencies (default: load")
+    println("                      cached deps from .bin instead of re-executing them)")
     println("  -pN, -p N           Run tests in parallel using N threads (e.g., -p4)")
     println("  --diff-style STYLE  Diff display style: unified, side-by-side, inline, minimal")
     println("  --output-dir DIR    Output directory for test results (default: books)")
@@ -529,6 +679,9 @@ object BooktestMain {
     println("  -t, --test-filter   Filter tests by name pattern")
     println("  --garbage           List orphan files in books/ and temp directories")
     println("  --clean             Remove orphan files and temp directories")
+    println("  --trace             Write structured event log to <output-dir>/.booktest.log")
+    println("                      (also enabled by BOOKTEST_TRACE=1; failure-time trace")
+    println("                       blocks attach automatically at -pN ≥ 2 either way)")
     println("  -h, --help          Show this help message")
     println()
     println("Configuration (booktest.conf):")

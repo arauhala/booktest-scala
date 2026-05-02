@@ -17,15 +17,23 @@ object EnvSnapshot {
   }
 }
 
+/** Per-test snapshot/capture manager.
+  *
+  * Designed for single-test use, but mutates `sys.props` (process-global) and
+  * holds three `var` maps. To stay safe if a test spawns threads that both
+  * touch the manager — and to harden the same defensive shape we use in
+  * DependencyCache / LiveResourceManager — every map mutation goes through
+  * `lock.synchronized`. */
 class EnvSnapshotManager(testCaseRun: TestCaseRun, envVarNames: List[String]) {
-  
+
   private val snapshotDir = testCaseRun.outDir / "_snapshots"
   private val snapshotFile = snapshotDir / "env.json"
-  
+
+  private val lock = new Object
   private var originalValues: Map[String, Option[String]] = Map.empty
   private var capturedValues: Map[String, Option[String]] = Map.empty
   private var snapshots: Map[String, Option[String]] = loadSnapshots()
-  
+
   private def loadSnapshots(): Map[String, Option[String]] = {
     if (os.exists(snapshotFile)) {
       try {
@@ -41,21 +49,24 @@ class EnvSnapshotManager(testCaseRun: TestCaseRun, envVarNames: List[String]) {
       Map.empty
     }
   }
-  
+
   private def saveSnapshots(): Unit = {
-    if (capturedValues.nonEmpty) {
+    val snapshot = lock.synchronized {
+      if (capturedValues.isEmpty) None
+      else Some(EnvSnapshot.fromOptionalMap(capturedValues))
+    }
+    snapshot.foreach { snap =>
       os.makeDir.all(snapshotDir)
-      val snapshot = EnvSnapshot.fromOptionalMap(capturedValues)
-      os.write.over(snapshotFile, write(snapshot, indent = 2))
+      os.write.over(snapshotFile, write(snap, indent = 2))
     }
   }
-  
-  def start(): Unit = {
+
+  def start(): Unit = lock.synchronized {
     // Store original values
     originalValues = envVarNames.map { name =>
       name -> sys.env.get(name)
     }.toMap
-    
+
     // Apply snapshots or capture current values
     envVarNames.foreach { name =>
       snapshots.get(name) match {
@@ -66,7 +77,7 @@ class EnvSnapshotManager(testCaseRun: TestCaseRun, envVarNames: List[String]) {
             case None => sys.props.remove(name)
           }
           capturedValues = capturedValues + (name -> value)
-          
+
         case None =>
           // Capture current value for future snapshots
           val currentValue = sys.env.get(name)
@@ -74,24 +85,26 @@ class EnvSnapshotManager(testCaseRun: TestCaseRun, envVarNames: List[String]) {
       }
     }
   }
-  
+
   def stop(): Unit = {
+    val toRestore = lock.synchronized(originalValues)
     // Restore original values
-    originalValues.foreach { case (name, value) =>
+    toRestore.foreach { case (name, value) =>
       value match {
         case Some(v) => sys.props(name) = v
         case None => sys.props.remove(name)
       }
     }
-    
+
     saveSnapshots()
     logSnapshots()
   }
-  
+
   private def logSnapshots(): Unit = {
-    if (capturedValues.nonEmpty) {
+    val captured = lock.synchronized(capturedValues)
+    if (captured.nonEmpty) {
       testCaseRun.h1("Environment Variables")
-      capturedValues.toSeq.sortBy(_._1).foreach { case (name, value) =>
+      captured.toSeq.sortBy(_._1).foreach { case (name, value) =>
         val valueStr = value.getOrElse("<not set>")
         testCaseRun.tln(s"$name = $valueStr")
       }
@@ -100,15 +113,17 @@ class EnvSnapshotManager(testCaseRun: TestCaseRun, envVarNames: List[String]) {
 }
 
 class EnvMockManager(envVars: Map[String, Option[String]]) {
-  
+
+  private val lock = new Object
   private var originalValues: Map[String, Option[String]] = Map.empty
-  
+
   def start(): Unit = {
-    // Store original values
-    originalValues = envVars.keys.map { name =>
-      name -> sys.env.get(name)
-    }.toMap
-    
+    lock.synchronized {
+      originalValues = envVars.keys.map { name =>
+        name -> sys.env.get(name)
+      }.toMap
+    }
+
     // Apply mock values
     envVars.foreach { case (name, value) =>
       value match {
@@ -117,10 +132,10 @@ class EnvMockManager(envVars: Map[String, Option[String]]) {
       }
     }
   }
-  
+
   def stop(): Unit = {
-    // Restore original values
-    originalValues.foreach { case (name, value) =>
+    val toRestore = lock.synchronized(originalValues)
+    toRestore.foreach { case (name, value) =>
       value match {
         case Some(v) => sys.props(name) = v
         case None => sys.props.remove(name)
