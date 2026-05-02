@@ -1,3 +1,0 @@
-  producing value
-
-Test 'producer' completed in 1ms

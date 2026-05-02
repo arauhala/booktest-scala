@@ -43,18 +43,22 @@ class RefreshDepsTest extends TestSuite {
   // -pN they must run one at a time. The lock has no effect at -p1.
   override protected def resourceLocks: List[String] = List("refresh-deps-counters")
 
-  private def quietConfig(tempDir: os.Path, filter: Option[String], refresh: Boolean): RunConfig = {
-    val logStream = new java.io.PrintStream(
-      new java.io.FileOutputStream((tempDir / s"runner-${System.nanoTime()}.log").toIO))
+  // Discard the inner runner's stdout — writing to a file here would
+  // pollute the meta-test's snapshot dir with non-deterministic logs.
+  private val nullStream = new java.io.PrintStream(new java.io.OutputStream {
+    override def write(b: Int): Unit = ()
+    override def write(b: Array[Byte], off: Int, len: Int): Unit = ()
+  })
+
+  private def quietConfig(tempDir: os.Path, filter: Option[String], refresh: Boolean): RunConfig =
     RunConfig(
       outputDir = tempDir,
       snapshotDir = tempDir,
       verbose = false,
-      output = logStream,
+      output = nullStream,
       testFilter = filter,
       refreshDeps = refresh
     )
-  }
 
   def testFilteredRunUsesCachedDep(t: TestCaseRun): Unit = {
     t.h1("Cached deps are loaded from .bin instead of re-executed")

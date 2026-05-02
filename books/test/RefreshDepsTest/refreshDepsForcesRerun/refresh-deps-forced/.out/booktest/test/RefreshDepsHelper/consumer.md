@@ -1,1 +1,0 @@
-consumed: produced_value
