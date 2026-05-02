@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.3 (unreleased)
+
+### Fix: `-t`-filtered runs no longer re-execute cached transitive dependencies
+
+A run scoped with `-t pattern` previously expanded the filter to include
+every transitive dependency unconditionally, so a 4-hour state-builder
+test with a fresh `.bin` cache would re-execute on every invocation of
+its consumer. This diverged from Python booktest's build-system
+semantic, which loads cached deps from disk and only runs them when the
+cache is missing.
+
+Filter expansion is now cache-aware (`expandSelectionWithMissingDeps`
+in `TestRunner`): a transitive dep is added to the run list only if (a)
+it matches the filter, (b) `-r` / `--refresh-deps` is set, or (c) its
+`<output>/.out/<suite>/<dep>.bin` is missing. Otherwise the consumer
+loads the producer's value from disk via `resolveDependencyValue` and
+the producer is not run.
+
+- New `-r` / `--refresh-deps` flag forces every transitive dep to
+  re-execute (use before benchmarks, or when you suspect upstream state
+  is stale).
+- `resolveDependencyOrder` now silently skips deps that exist in the
+  suite but were filtered out as cached, instead of throwing
+  `Dependency '...' not found`. Genuinely unknown names still throw.
+- The pre-pass in `runMultipleSuites` (`scheduledInThisRun`,
+  live-resource refcount reservation) uses the same expansion, so the
+  cache-fence and refcount stay in sync with what actually runs.
+
+New meta-suite `RefreshDepsTest` covers all three branches: cached dep
+is loaded from `.bin`, `-r` forces a re-run, and a missing `.bin`
+auto-includes the dep without `-r`.
+
 ## 0.4.2 (2026-04-29)
 
 ### Fix Issue 1: live-resource consumers could outrun their transitive TestRef producers under -pN
