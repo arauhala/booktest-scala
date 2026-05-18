@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.3 (2026-05-18)
+## 0.4.4 (2026-05-18)
 
 ### Feature: `memoryCapacity` — GC-forcing variant of `capacity`
 
