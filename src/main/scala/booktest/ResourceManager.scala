@@ -40,7 +40,49 @@ class ResourceManager(portPool: PortPool = new PortPool()) {
 
   /** Get-or-create a Double capacity. Subsequent calls with the same name
     * return the same instance (so all suites share one budget). */
-  def capacity(name: String, default: Double): ResourceCapacity[Double] = synchronized {
+  def capacity(name: String, default: Double): ResourceCapacity[Double] =
+    getOrCreateDoubleCapacity(name, default, forceGcOnRelease = false)
+
+  /** Get-or-create a memory-typed Double capacity.
+    *
+    * Identical to [[capacity]] except that `release(amount)` invokes
+    * `System.gc()` *while holding the capacity lock* before notifying
+    * waiters. When `release` returns, the JVM has (best-effort) reclaimed
+    * the previous consumer's heap — not just decremented the logical
+    * counter.
+    *
+    * Use for RAM budgets on shared JVM-resident resources whose `close()`
+    * drops references but where GC hasn't yet reclaimed the bytes, and
+    * the next consumer is about to allocate into the same heap. The
+    * concrete case this addresses: two test classes under `-pN`, each
+    * owning a heavy shared instance via a `liveResource` reserving the
+    * same RAM capacity, where the second class's `build` starts the
+    * moment the first's refcount hits zero. Without forced gc the old
+    * instance's bytes are still resident, the new one allocates on top
+    * of them, and the JVM thrashes into a multi-second GC pause window
+    * that breaks Akka HTTP / test timeouts long before any actual OOM.
+    *
+    * Caveats:
+    *  - `System.gc()` is a hint. HotSpot's default (Parallel) GC honours
+    *    it as a full STW collection. Under
+    *    `-XX:+ExplicitGCInvokesConcurrent` (common with G1/ZGC tuning)
+    *    it does not stop-the-world and the race can come back.
+    *  - Each `release` adds ~100–500 ms of latency on HotSpot. Acceptable
+    *    for memory capacities that bracket heavyweight live resources;
+    *    do not use for hot-path resources.
+    *
+    * Subsequent calls with the same `name` return the same instance, so
+    * all suites share one budget. Total overridable at runtime via
+    * `--capacity <name>=<value>` or `BOOKTEST_CAPACITY_<NAME>`.
+    */
+  def memoryCapacity(name: String, default: Double): ResourceCapacity[Double] =
+    getOrCreateDoubleCapacity(name, default, forceGcOnRelease = true)
+
+  private def getOrCreateDoubleCapacity(
+      name: String,
+      default: Double,
+      forceGcOnRelease: Boolean
+  ): ResourceCapacity[Double] = synchronized {
     capacities.get(name) match {
       case Some(c) => c.asInstanceOf[ResourceCapacity[Double]]
       case None =>
@@ -48,7 +90,7 @@ class ResourceManager(portPool: PortPool = new PortPool()) {
           sys.env.get(s"BOOKTEST_CAPACITY_${name.toUpperCase}")
             .flatMap(s => scala.util.Try(s.toDouble).toOption)
             .getOrElse(default))
-        val cap = new DoubleCapacity(name, total)
+        val cap = new DoubleCapacity(name, total, forceGcOnRelease)
         capacities(name) = cap.asInstanceOf[ResourceCapacity[Any]]
         cap
     }
@@ -116,9 +158,17 @@ trait ResourceCapacity[N] {
 
 /**
  * Double-valued capacity. Suitable for RAM (in MB or GB), CPU shares, etc.
+ *
+ * When `forceGcOnRelease` is true, `release` invokes `System.gc()` *while
+ * holding the capacity lock* before notifying waiters. This is the
+ * "memory-typed" mode produced by [[ResourceManager.memoryCapacity]] —
+ * see the scaladoc there for the motivating race and caveats.
  */
-class DoubleCapacity(val name: String, val capacity: Double)
-    extends ResourceCapacity[Double] {
+class DoubleCapacity(
+    val name: String,
+    val capacity: Double,
+    forceGcOnRelease: Boolean = false
+) extends ResourceCapacity[Double] {
 
   private var _used: Double = 0.0
   private val lock = new Object()
@@ -146,6 +196,10 @@ class DoubleCapacity(val name: String, val capacity: Double)
   override def release(amount: Double): Unit = lock.synchronized {
     _used -= amount
     if (_used < 0) _used = 0.0
+    // System.gc() must run while the lock is held — otherwise a waiter
+    // can acquire between the decrement and the gc, defeating the
+    // physical-free contract that memoryCapacity advertises.
+    if (forceGcOnRelease) System.gc()
     lock.notifyAll()
   }
 }

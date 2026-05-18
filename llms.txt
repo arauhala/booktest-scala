@@ -51,6 +51,7 @@ Run: `sbt 'Test/runMain booktest.BooktestMain my.MyTests'`. First run writes
 | `exclusiveResource(name, deps...)(build)` | Per-consumer instance |
 | `liveResourceWithReset(name, deps...)(build)(reset)` | Shared, serialized, reset between consumers |
 | `capacity(name, total)` | Numeric budget (RAM, CPU shares) |
+| `memoryCapacity(name, total)` | Like `capacity` but `release` forces `System.gc()` under the lock — for JVM heap budgets on shared live resources |
 | `setup(t)` / `teardown(t)` | Per-test hooks (override) |
 | `beforeAll()` / `afterAll()` | Per-suite hooks (override) |
 | `resourceLocks: List[String]` | Override to serialize tests within suite (parallel mode) |
@@ -163,6 +164,8 @@ between release and re-issue (default 250ms). Override via
 `BOOKTEST_PORT_MAX` (default 10000–60000).
 
 Capacity: `val ram = capacity("ram", 4096.0)`; override via `BOOKTEST_CAPACITY_RAM=8192` or `--capacity ram=8192`.
+
+MemoryCapacity: `val heap = memoryCapacity("jvmHeap", 1500.0)`. Same surface as `capacity`, but `release` forces `System.gc()` under the capacity lock before notifying waiters — so the heap is genuinely free when the next consumer's `build` allocates. Use for JVM heap budgets on shared in-process live resources; without it, two test classes each reserving 1.5 GB on a 2 GB JVM thrash through a multi-second GC window between consumers (manifests as Akka HTTP timeouts / `GCOverheadLimitExceeded`, not OOM). Caveats: hint-only under `-XX:+ExplicitGCInvokesConcurrent`; adds ~100–500 ms latency per release.
 
 ## CLI
 
