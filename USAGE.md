@@ -614,6 +614,54 @@ total (which would deadlock on acquire). Cross-resource sums are not
 validated statically — the runtime acquire path blocks safely if real
 demand exceeds capacity.
 
+##### `memoryCapacity` — GC-forcing variant for JVM heap budgets
+
+`capacity` is a logical counter — `release(amount)` makes the slot
+immediately available to the next waiter. For non-memory resources
+(file handles, port numbers, CPU shares) that is correct: the resource
+is genuinely free the moment the counter ticks down.
+
+For **JVM heap** budgets it is not. When a shared live resource closes,
+its `close()` drops references but the bytes stay on the heap until GC
+runs. Under `-pN` the next consumer's `build` starts the instant
+refcount hits zero, and allocates into a heap that is still 100% full
+of the previous instance. The JVM then thrashes through a multi-second
+GC pause window — long enough to time out Akka HTTP requests or trip
+the `GCOverheadLimitExceeded` failsafe — before any actual `OutOfMemoryError`
+ever fires.
+
+`memoryCapacity` closes that window. It is identical to `capacity`
+except `release` invokes `System.gc()` *while holding the capacity
+lock* before notifying waiters:
+
+```scala
+// Identical surface; just declare with memoryCapacity instead.
+val heap = memoryCapacity("jvmHeap", 1500.0)  // 1.5 GB reserved
+
+val server: ResourceRef[Server] =
+  liveResource("server", heap.reserve(1500.0)) { (mb: Double) =>
+    new JvmResidentServer(allocatedMb = mb)
+  }
+```
+
+When `release` returns, the JVM has (best-effort) reclaimed the
+previous consumer's heap. The next acquirer allocates into actually-free
+memory.
+
+Caveats:
+
+- `System.gc()` is a hint. HotSpot's default GC honours it as a full
+  STW collection. Under `-XX:+ExplicitGCInvokesConcurrent` (sometimes
+  set with G1/ZGC) it does **not** stop-the-world and the race can come
+  back. Document the JVM-flag assumption for callers who rely on it.
+- Each `release` adds ~100–500 ms of latency on HotSpot — the cost of
+  the forced GC. Acceptable for memory capacities that bracket
+  heavyweight live resources; do not use for hot-path resources.
+- A `memoryCapacity` and a plain `capacity` declared with the same name
+  resolve to the same instance (process-global registry, name-keyed).
+  Whichever wins the first call wins the `forceGcOnRelease` flag. Pick
+  one form and stick to it for a given name.
+
 #### Failure handling
 
 | Event | Action |

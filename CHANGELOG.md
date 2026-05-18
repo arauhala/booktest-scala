@@ -1,6 +1,39 @@
 # Changelog
 
-## 0.4.3 (unreleased)
+## 0.4.4 (2026-05-18)
+
+### Feature: `memoryCapacity` — GC-forcing variant of `capacity`
+
+`capacity(name, total)` is a logical counter: `release(amount)` makes
+the slot available to the next waiter the instant the count ticks down.
+That contract subtly breaks for **JVM heap** budgets — `release`
+decrements the counter but the previous consumer's bytes are still on
+the heap until GC runs, and the next consumer's `build` allocates on
+top of them. Reproducible failure mode under `-pN`: two test classes
+each owning a 1.5 GB shared in-process server on a 2 GB JVM thrash
+through a multi-second GC window between consumers, surfacing as Akka
+HTTP timeouts or `GCOverheadLimitExceeded` (not OOM).
+
+New `memoryCapacity(name, total)` on `TestSuite` (and
+`ResourceManager.memoryCapacity`) declares the same kind of numeric
+budget but invokes `System.gc()` *while holding the capacity lock*
+before notifying waiters. When `release` returns, the JVM has
+(best-effort) reclaimed the previous consumer's heap.
+
+```scala
+val heap = memoryCapacity("jvmHeap", 1500.0)
+
+val server: ResourceRef[Server] =
+  liveResource("server", heap.reserve(1500.0)) { (mb: Double) =>
+    new JvmResidentServer(mb)
+  }
+```
+
+Caveats: `System.gc()` is a hint — HotSpot's default GC honours it but
+`-XX:+ExplicitGCInvokesConcurrent` (sometimes set with G1/ZGC) does
+not. Each release adds ~100–500 ms of latency on HotSpot; use for
+memory-bracketed live resources, not hot-path resources. Plain
+`capacity` is unchanged.
 
 ### Fix: `-t`-filtered runs no longer re-execute cached transitive dependencies
 

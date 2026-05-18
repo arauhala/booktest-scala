@@ -311,7 +311,18 @@ abstract class TestSuite {
     * var `BOOKTEST_CAPACITY_<NAME>`. */
   protected def capacity(name: String, total: Double): ResourceCapacity[Double] =
     resources.capacity(name, total)
-  
+
+  /** Declare a memory-typed numeric capacity (e.g. 1500 MB of JVM heap
+    * reserved for a shared in-process server). Identical to [[capacity]]
+    * but `release` forces GC so the heap is genuinely free when the next
+    * consumer allocates. Use for RAM budgets on shared JVM-resident
+    * resources where `close()` drops references but GC hasn't reclaimed
+    * the bytes yet. See [[ResourceManager.memoryCapacity]] for full
+    * caveats. */
+  protected def memoryCapacity(name: String, total: Double): ResourceCapacity[Double] =
+    resources.memoryCapacity(name, total)
+
+
   private def discoverTests(): List[TestCase] = {
     val clazz = this.getClass
     val methods = clazz.getDeclaredMethods
