@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.5 (2026-06-01)
+
+### Feature: `--setup` and external-tool configuration
+
+Closes a Python-parity gap: `diff_tool` and `md_viewer` (and friends)
+were unreachable except through `BOOKTEST_*` environment variables.
+
+- New `--setup` subcommand prompts for `diff_tool`, `fast_diff_tool`,
+  `md_viewer`, `log_viewer` and writes `~/.booktest`.
+- New `ToolConfig` resolves tools in the same order as Python booktest:
+  `~/.booktest` → `./booktest.ini` → `./.booktest` → `BOOKTEST_*` env →
+  built-in default. CLI flags `--md-viewer CMD` / `--diff-tool CMD`
+  override for a single invocation.
+- New `--view` subcommand opens the selected snapshots in `md_viewer`.
+- `SnapshotManager.runTool` now consults `ToolConfig` instead of just
+  env vars, so `(d)iff`, `(v)iew`, `(l)ogs`, and `(D)fast-diff` actions
+  in interactive (`-i`) and review (`-w`) modes honor a project-wide
+  `meld` / `retext --preview` setup.
+
+Typical use: `booktest --setup` once, picking `meld` and `retext
+--preview`; thereafter `-i` opens diffs in Meld and views in ReText.
+
 ## 0.4.4 (2026-05-18)
 
 ### Feature: `memoryCapacity` — GC-forcing variant of `capacity`

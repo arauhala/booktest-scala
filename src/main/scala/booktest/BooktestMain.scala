@@ -31,6 +31,8 @@ object BooktestMain {
     var cleanMode = false  // --clean: remove orphan files and temp directories
     var rootOverride: Option[String] = None  // --root: package prefix to strip from paths
     var invalidateLiveOnFail = false  // --invalidate-live-on-fail
+    var setupMode = false  // --setup: interactive personal tool config
+    var viewMode = false   // --view: open selected snapshots in md_viewer
     var traceFlag = sys.env.contains("BOOKTEST_TRACE")  // --trace / BOOKTEST_TRACE=1
     var buildGraphMode = false  // -b / --build-graph: print task DAG with state
     var capacityOverrides = Map.empty[String, Double]  // --capacity name=value
@@ -54,6 +56,14 @@ object BooktestMain {
         case "-r" | "--refresh-deps" => refreshDeps = true  // Force re-run of transitive deps
         case "--garbage" => garbageMode = true  // List orphan files in books/
         case "--clean" => cleanMode = true  // Remove orphan files and .tmp directories
+        case "--setup" => setupMode = true  // Interactive personal tool config
+        case "--view" => viewMode = true  // Open selected snapshots in md_viewer
+        case "--md-viewer" =>
+          i += 1
+          if (i < args.length) ToolConfig.setOverride("md_viewer", args(i))
+        case "--diff-tool" =>
+          i += 1
+          if (i < args.length) ToolConfig.setOverride("diff_tool", args(i))
         case "--invalidate-live-on-fail" => invalidateLiveOnFail = true
         case "--trace" => traceFlag = true
         case "-b" | "--build-graph" => buildGraphMode = true
@@ -128,6 +138,13 @@ object BooktestMain {
       i += 1
     }
     
+    // --setup runs before any test resolution (no suite needed)
+    if (setupMode) {
+      val rc = BooktestSetup.run()
+      if (rc != 0) throw new BooktestFailure("Setup failed")
+      return
+    }
+
     // Load booktest.conf if present, with optional --root override
     val booktestConfig = {
       val loaded = BooktestConfig.load().getOrElse(BooktestConfig.empty)
@@ -297,6 +314,28 @@ object BooktestMain {
       val runner = new TestRunner(config)
       val exitCode = runner.reviewResults(suites)
       if (exitCode != 0) throw new BooktestFailure("Review found unresolved diffs")
+      return
+    }
+
+    if (viewMode) {
+      // Open selected snapshot .md files in md_viewer (Python parity for --view)
+      val files = scala.collection.mutable.ListBuffer[os.Path]()
+      suites.foreach { suite =>
+        val suitePath = booktestConfig.classNameToPath(suite.fullClassName)
+        val filteredTests = config.testFilter match {
+          case Some(pattern) => suite.testCases.filter(_.name.contains(pattern))
+          case None => suite.testCases
+        }
+        filteredTests.foreach { tc =>
+          val md = config.snapshotDir / os.RelPath(suitePath) / s"${tc.name}.md"
+          if (os.exists(md)) files += md
+        }
+      }
+      if (files.nonEmpty) {
+        SnapshotManager.runTool("md_viewer", files.map(_.toString).mkString(" "))
+      } else {
+        println("No snapshot files found for the selected tests.")
+      }
       return
     }
 
@@ -679,6 +718,10 @@ object BooktestMain {
     println("  -t, --test-filter   Filter tests by name pattern")
     println("  --garbage           List orphan files in books/ and temp directories")
     println("  --clean             Remove orphan files and temp directories")
+    println("  --setup             Interactive personal-tool config (writes ~/.booktest)")
+    println("  --view              Open selected snapshots in md_viewer")
+    println("  --md-viewer CMD     Override md_viewer for this invocation")
+    println("  --diff-tool CMD     Override diff_tool for this invocation")
     println("  --trace             Write structured event log to <output-dir>/.booktest.log")
     println("                      (also enabled by BOOKTEST_TRACE=1; failure-time trace")
     println("                       blocks attach automatically at -pN ≥ 2 either way)")
