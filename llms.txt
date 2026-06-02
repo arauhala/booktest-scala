@@ -197,6 +197,9 @@ sbt 'Test/runMain booktest.BooktestMain [flags] [test classes / groups]'
 | `--clean` | Delete orphan files and tmp dirs |
 | `--invalidate-live-on-fail` | Force-close shared live resources on consumer failure |
 | `--capacity NAME=VALUE` | Override a `capacity(NAME, _)` total |
+| `--setup` | Interactive personal-tool config — writes `~/.booktest` |
+| `--view` | Open selected snapshots in `md_viewer` |
+| `--md-viewer CMD` / `--diff-tool CMD` | One-shot override of resolved tool |
 | `-h, --help` | Show help |
 
 ## Configuration (`booktest.ini`)
@@ -216,6 +219,12 @@ books-path = books          # Snapshot directory
 - `BOOKTEST_PORT_BASE` — port pool base (default 10000)
 - `BOOKTEST_PORT_MAX` — port pool max (default 60000)
 - `BOOKTEST_CAPACITY_<NAME>` — override `capacity(name, _)` total (uppercase)
+- `BOOKTEST_DIFF_TOOL` / `BOOKTEST_FAST_DIFF_TOOL` / `BOOKTEST_MD_VIEWER` / `BOOKTEST_LOG_VIEWER` — external review tools (defaults: `diff` / `diff` / `less` / `less`)
+
+External-tool resolution order (later wins): `~/.booktest` → `./booktest.ini` →
+`./.booktest` → `BOOKTEST_*` env → `--md-viewer`/`--diff-tool` CLI flag.
+Run `booktest --setup` to write `~/.booktest` (typical: `diff_tool=meld`,
+`md_viewer=retext --preview`).
 
 ## File Layout
 

@@ -222,18 +222,12 @@ object SnapshotManager {
     }
   }
 
-  /** Run an external tool from config/env.
-    * Resolution order: BOOKTEST_{TOOL_UPPER} env var, then default.
+  /** Run an external tool resolved via [[ToolConfig]].
+    * Resolution order: CLI override → `~/.booktest` / `./booktest.ini` /
+    * `./.booktest` → `BOOKTEST_*` env → built-in default.
     * Matches Python booktest's run_tool(). */
   def runTool(toolName: String, args: String): Unit = {
-    val envKey = s"BOOKTEST_${toolName.toUpperCase}"
-    val defaults = Map(
-      "diff_tool" -> "diff",
-      "fast_diff_tool" -> "diff",
-      "md_viewer" -> "less",
-      "log_viewer" -> "less"
-    )
-    sys.env.get(envKey).orElse(defaults.get(toolName)) match {
+    ToolConfig.lookup(toolName) match {
       case Some(cmd) =>
         os.proc("sh", "-c", s"$cmd $args").call(
           stdin = os.Inherit,
@@ -243,7 +237,8 @@ object SnapshotManager {
         )
       case None =>
         println(s"  $toolName is not defined.")
-        println(s"  define it as env variable $envKey")
+        println(s"  configure it via 'booktest --setup', booktest.ini, ~/.booktest, " +
+          s"or env var BOOKTEST_${toolName.toUpperCase}")
     }
   }
 

@@ -787,6 +787,10 @@ sbt "Test/runMain booktest.BooktestMain --clean"
 | `--clean` | Remove orphan files and tmp directories |
 | `--invalidate-live-on-fail` | Force-close shared live resources after a consumer failure (default: keep alive) |
 | `--capacity NAME=VALUE` | Override a `capacity(NAME, _)` total at runtime |
+| `--setup` | Interactive personal-tool config — writes `~/.booktest` |
+| `--view` | Open selected snapshots in `md_viewer` |
+| `--md-viewer CMD` | Override `md_viewer` for this invocation |
+| `--diff-tool CMD` | Override `diff_tool` for this invocation |
 | `--help` | Show help |
 
 ### Environment Variables
@@ -797,6 +801,35 @@ sbt "Test/runMain booktest.BooktestMain --clean"
 | `BOOKTEST_PORT_MAX` | Port pool maximum port (default: 60000) |
 | `BOOKTEST_PORT_COOLDOWN_MS` | Cooldown between releasing and re-issuing the same port (default: 250). Prevents the kernel from racing a fresh bind against the previous listener's teardown. Set to 0 to disable. |
 | `BOOKTEST_CAPACITY_<NAME>` | Override `capacity(name, _)` total (uppercase suffix) |
+| `BOOKTEST_DIFF_TOOL` | Diff tool used by `(d)iff` in interactive/review (e.g. `meld`) |
+| `BOOKTEST_FAST_DIFF_TOOL` | Fast-diff tool for `(D)` action (default `diff`) |
+| `BOOKTEST_MD_VIEWER` | Markdown viewer for `(v)iew` and `--view` (e.g. `retext --preview`) |
+| `BOOKTEST_LOG_VIEWER` | Log viewer (default `less`) |
+
+#### External-tool configuration
+
+`diff_tool`, `fast_diff_tool`, `md_viewer`, `log_viewer` are resolved
+in this order (later wins):
+
+1. `~/.booktest` (personal, gitignored)
+2. `./booktest.ini` (project, committed)
+3. `./.booktest` (project-local, gitignored)
+4. `BOOKTEST_*` env vars
+5. `--md-viewer` / `--diff-tool` CLI flags
+
+Built-in defaults are `diff` / `less` so review still works without
+configuration. Run `booktest --setup` to write `~/.booktest`
+interactively — typical values are `meld` for `diff_tool` and
+`retext --preview` for `md_viewer`.
+
+Example `~/.booktest`:
+
+```ini
+diff_tool = meld
+fast_diff_tool = diff
+md_viewer = retext --preview
+log_viewer = less
+```
 
 ## Snapshot Directory Structure
 
