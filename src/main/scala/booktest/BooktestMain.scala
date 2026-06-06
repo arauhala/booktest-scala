@@ -899,9 +899,11 @@ object BooktestMain {
       os.list(dir).foreach { path =>
         if (os.isDir(path)) {
           val name = path.last
-          // Check if this is a test tmp directory (has corresponding .md or .bin file)
-          val mdFile = dir / s"$name.md"
-          val binFile = dir / s"$name.bin"
+          // A per-test working dir is either the asset dir `<test>/` or the tmp
+          // dir `<test>.tmp/`; both sit next to the test's `<test>.md`/`<test>.bin`.
+          val baseName = if (name.endsWith(".tmp")) name.dropRight(".tmp".length) else name
+          val mdFile = dir / s"$baseName.md"
+          val binFile = dir / s"$baseName.bin"
           if (os.exists(mdFile) || os.exists(binFile)) {
             tmpDirs += path
           } else {

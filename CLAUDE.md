@@ -234,14 +234,16 @@ class FunctionSnapshotTests extends TestSuite {
 books/
 ├── .out/                        # Test execution output (gitignored)
 │   └── SuiteName/
-│       ├── testName/            # Tmp directory for test
+│       ├── testName/            # Asset dir (t.file()): images/graphs; COPIED into the committed snapshot
+│       ├── testName.tmp/        # Tmp dir (t.tmpDir()/tmpFile()/tmpPath()): scratch; never committed
 │       ├── testName.bin         # Return value cache (for dependencies)
 │       ├── testName.md          # Raw captured test output (compared against the committed snapshot)
 │       ├── testName.log         # Captured stdout/stderr
 │       ├── testName.txt         # Per-line diff report with ?/./! markers, side-by-side expected vs actual, plus status/duration — matches Python booktest's `<name>.txt`. This is what humans/CI artifact viewers should look at after a flagged DIFF.
 │       └── testName.snapshots.json  # HTTP/function snapshots
 ├── SuiteName/                   # Final snapshots (committed to Git)
-│   └── testName.md
+│   ├── testName.md
+│   └── testName/                # Committed assets from t.file() (e.g. images embedded in the .md)
 └── index.md                     # Optional index file
 ```
 

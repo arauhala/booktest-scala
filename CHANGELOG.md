@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.4.6 (2026-06-06)
+
+### Fix: separate tmp dir from asset dir (tmp files no longer leak into Git)
+
+`tmpDirPath` (`tmpDir()`/`tmpFile()`/`tmpPath()`) resolved to the **same**
+path as the asset dir (`file()`, images, graphs): `books/.out/<suite>/<test>/`.
+Because `updateSnapshot` copies the entire asset dir into the committed
+`books/<suite>/<test>/`, every scratch file written via `tmpFile()` — plus
+the internal `.snapshots` compute cache — got swept into Git on the next
+snapshot accept.
+
+This restores Python booktest's layout, where the tmp dir carries a `.tmp`
+suffix to keep it out of the committed asset dir:
+
+- `tmpDirPath` is now `books/.out/<suite>/<test>.tmp/` (was `<test>/`).
+- `assetsDir` stays `books/.out/<suite>/<test>/` — only its contents are
+  committed; `file()` is for files meant to reach Git (images embedded in
+  the report markdown).
+- `clearTmpDir()` now purges both the asset dir and the tmp dir before a
+  re-run, matching Python's `start()` (rmtrees `out_dir_name` and
+  `out_tmp_dir_name`).
+- `--garbage`/`--clean` now recognize `<test>.tmp/` working dirs.
+
 ## 0.4.5 (2026-06-01)
 
 ### Feature: `--setup` and external-tool configuration
