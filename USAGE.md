@@ -179,7 +179,10 @@ Use `-S` (recapture) to force recomputation of all cached snapshots.
 
 ### Temporary Directories
 
-Files that persist between dependent tests but are cleared on re-run:
+Scratch files that persist between dependent tests but are cleared on re-run.
+They live in `books/.out/<suite>/<test>.tmp/` and are **never** committed to
+Git — use `t.file(name)` instead for files that should reach the snapshot
+(images, graphs embedded in the report markdown).
 
 ```scala
 class DataPipelineTests extends TestSuite {
@@ -837,7 +840,8 @@ log_viewer = less
 books/
 ├── .out/                        # Test execution output (gitignored)
 │   └── SuiteName/
-│       ├── testName/            # Tmp directory for test
+│       ├── testName/            # Asset dir (t.file()): copied into the committed snapshot
+│       ├── testName.tmp/        # Tmp dir (t.tmpDir()/tmpFile()/tmpPath()): scratch, never committed
 │       ├── testName.bin         # Return value cache (for dependencies)
 │       ├── testName.md          # Test output (raw captured content)
 │       ├── testName.txt         # Per-line diff report + status/duration

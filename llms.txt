@@ -99,9 +99,9 @@ Run: `sbt 'Test/runMain booktest.BooktestMain my.MyTests'`. First run writes
 - `executionContext: ExecutionContext` — cached thread pool
 
 **File management**:
-- `file(name)` — File in test assets dir (`books/<suite>/<test>/<name>`)
-- `tmpFile(name)` / `tmpDir(name)` / `tmpPath(name)` — under `books/.out/<suite>/<test>/`; cleared on re-run; supports `"/"` for nested paths
-- `clearTmpDir()` — explicit clear
+- `file(name)` — File in test assets dir (`books/.out/<suite>/<test>/<name>`); copied into the committed snapshot — use for images/graphs that belong in Git
+- `tmpFile(name)` / `tmpDir(name)` / `tmpPath(name)` — scratch under `books/.out/<suite>/<test>.tmp/` (note `.tmp`); never committed; cleared on re-run; supports `"/"` for nested paths
+- `clearTmpDir()` — explicit clear (purges both the asset dir and the tmp dir)
 
 **Review workflow** (AI-assisted batch review):
 - `startReview()` — begin a review section (header written)
@@ -236,7 +236,8 @@ books/
 │       ├── <test>.md          # raw captured output (compared against snapshot)
 │       ├── <test>.log         # captured stdout/stderr
 │       ├── <test>.txt         # per-line diff report (?/./! markers, side-by-side) + status — match Python booktest. CI artifact viewers should land here for a flagged DIFF.
-│       └── <test>/            # tmpDir for the test
+│       ├── <test>/            # asset dir (t.file()): copied into the committed snapshot
+│       └── <test>.tmp/        # tmp dir (t.tmpDir()/tmpFile()/tmpPath()): scratch, never committed
 ├── <suite>/
 │   ├── <test>.md              # COMMITTED snapshot (the spec)
 │   └── <test>/                # COMMITTED assets (images etc.)

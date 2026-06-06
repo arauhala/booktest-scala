@@ -59,9 +59,11 @@ class TestCaseRun(
     dir
   }
 
-  // Temporary directory for this test (cleared on re-run, persists for dependent tests)
-  // Python style: books/.out/<suite>/<test>/
-  lazy val tmpDirPath: Path = outDir / testName
+  // Temporary directory for this test (cleared on re-run, persists for dependent tests).
+  // Python style: books/.out/<suite>/<test>.tmp/ — the trailing `.tmp` keeps scratch
+  // files OUT of the asset dir (`assetsDir`, books/.out/<suite>/<test>/), which is
+  // copied into the committed snapshot. Without the suffix, tmp files leak into Git.
+  lazy val tmpDirPath: Path = outDir / s"$testName.tmp"
 
   // Return value cache file (for dependency injection between tests)
   // Python style: books/.out/<suite>/<test>.bin
@@ -383,13 +385,16 @@ class TestCaseRun(
     dir
   }
 
-  /** Clear the temporary directory (called before test re-runs).
-    * This removes all files created by previous runs of this test.
+  /** Purge the previous run's output directories (called before test re-runs).
+    * Removes both the asset dir (`assetsDir`) and the tmp dir (`tmpDirPath`),
+    * matching Python booktest's start(), which rmtrees out_dir_name and
+    * out_tmp_dir_name. Computed via path literals to avoid the lazy-val side
+    * effect of recreating the dirs we're about to delete.
     */
   def clearTmpDir(): Unit = {
-    if (os.exists(tmpDirPath)) {
-      os.remove.all(tmpDirPath)
-    }
+    val assetDir = outDir / testName
+    if (os.exists(assetDir)) os.remove.all(assetDir)
+    if (os.exists(tmpDirPath)) os.remove.all(tmpDirPath)
   }
 
   /** Output a labeled key-value pair as test line (like Python's key()) */
