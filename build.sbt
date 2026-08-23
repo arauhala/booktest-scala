@@ -34,6 +34,12 @@ ThisBuild / sonatypeCredentialHost := "central.sonatype.com"
 ThisBuild / sonatypeRepository := "https://central.sonatype.com/api/v1/publisher"
 ThisBuild / publishTo := sonatypePublishToBundle.value
 
+// Which gpg binary signs the artifacts. Overridable so the dev shell can
+// supply one that prompts on the TERMINAL (`gpg-loopback`) instead of asking
+// gpg-agent for a pinentry program — see the long comment in shell.nix.
+// Defaults to plain `gpg`, so nothing changes outside that shell.
+ThisBuild / com.jsuereth.sbtpgp.PgpKeys.gpgCommand := sys.env.getOrElse("GPG_COMMAND", "gpg")
+
 lazy val root = (project in file("."))
   .settings(
     name := "booktest-scala",

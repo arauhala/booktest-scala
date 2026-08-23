@@ -45,6 +45,10 @@ compiled class cannot be found, *refuses* with an explanation rather than
 falling back to a constant, because a key that does not depend on the code
 answers "cached" for code it has never seen.
 
+Parallel runs (`-pN`) use the cache exactly like sequential ones — worth
+stating because they take a separate execution path internally, and the first
+cut of this feature silently bypassed it there.
+
 **`--require-cache` is for pull requests only.** A merge commit's tree differs
 from the PR head whenever the base has moved, so no entry can exist for it and
 nobody can produce one ahead of time. Run master with `-C`.

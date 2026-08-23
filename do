@@ -39,6 +39,24 @@ cmd_publish() {
     echo "==> Setting up GPG environment..."
     export GPG_TTY=$(tty)
 
+    # Pre-flight: a signing setup that cannot prompt for a passphrase fails
+    # AFTER cross-compiling every Scala version, which is a long wait for a
+    # one-line problem. Check it in a second instead.
+    _pe=$(awk '/^pinentry-program/{print $2}' "$HOME/.gnupg/gpg-agent.conf" 2>/dev/null | head -1)
+    if [ -n "$_pe" ] && [ ! -x "$_pe" ] && [ -z "${GPG_COMMAND:-}" ]; then
+        echo "ERROR: gpg cannot ask you for a passphrase."
+        echo "  ~/.gnupg/gpg-agent.conf points at a pinentry that does not exist:"
+        echo "    $_pe"
+        echo "  (a nix-store path removed by garbage collection — your key is fine)"
+        echo
+        echo "  Fix either way:"
+        echo "    - run this inside 'nix-shell' here, which sets GPG_COMMAND=gpg-loopback, or"
+        echo "    - install a pinentry that survives GC and point gpg-agent.conf at it,"
+        echo "      then 'gpgconf --kill gpg-agent' (the agent caches its config at startup)."
+        exit 1
+    fi
+    unset _pe
+
     echo "==> Publishing signed artifacts for all Scala versions..."
     sbt +publishSigned
 
