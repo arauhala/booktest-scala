@@ -57,6 +57,32 @@ cmd_publish() {
     fi
     unset _pe
 
+    # Both of these bit us on a real release, and both are knowable up front.
+    _version=$(grep -oP 'ThisBuild / version := "\K[^"]+' build.sbt | head -1)
+    if [ -z "$_version" ]; then
+        echo "ERROR: could not read the version from build.sbt"; exit 1
+    fi
+    echo "==> Version: $_version"
+
+    # 1. Already released? Central is immutable, so publishing an existing
+    #    version rebuilds and re-signs everything, warns "attempting to
+    #    overwrite (non-SNAPSHOT)" for every artifact, and cannot succeed. The
+    #    usual cause is simply forgetting to bump.
+    _url="https://repo1.maven.org/maven2/io/github/arauhala/booktest-scala_2.12/$_version/booktest-scala_2.12-$_version.pom"
+    if [ "$(curl -s -o /dev/null -w '%{http_code}' "$_url")" = "200" ]; then
+        echo "ERROR: $_version is already on Maven Central and cannot be replaced."
+        echo "  Bump 'ThisBuild / version' in build.sbt (and the README dependency"
+        echo "  line), add a CHANGELOG entry, then publish."
+        exit 1
+    fi
+
+    # 2. A leftover staging directory makes the bundle step fail with
+    #    BUNDLE_ZIP_ERROR after all the signing work is already done.
+    if [ -d target/sonatype-staging ]; then
+        echo "==> Clearing stale staging directories: $(ls target/sonatype-staging | tr '\n' ' ')"
+        rm -rf target/sonatype-staging
+    fi
+
     echo "==> Publishing signed artifacts for all Scala versions..."
     sbt +publishSigned
 
