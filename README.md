@@ -217,6 +217,43 @@ design and a worked example.
 | `--clean` | Remove orphan files and tmp directories |
 | `--invalidate-live-on-fail` | Force-close shared live resources after a consumer fails |
 | `--capacity NAME=VALUE` | Override a `capacity(NAME, _)` total at runtime |
+| `--stamps` | Consult and write result stamps; **a miss runs the test** |
+| `--require-stamps` | Consult stamps; **a miss fails** with instructions instead of running |
+| `--verify-stamps` | Run everything from scratch and audit what the stamps claim |
+
+### Result stamps (content-addressed test cache)
+
+A stamp records that a case **passed for a given input hash**, so a later run
+that hashes to the same value can skip it — the Bazel / Gradle build-cache idea.
+The point is to let a PR be accepted on the proof that the suite passed locally,
+while master and deployment keep running everything.
+
+**A stamp is a cache with a fallback, never an authority.** Absent, malformed,
+unreadable, or a different key all mean *run the test*. There is no code path
+where a bad stamp means "passed".
+
+```bash
+booktest --stamps            # local: skip what is provably unchanged
+booktest --require-stamps    # CI: refuse to run; accept the proof or fail
+booktest --verify-stamps     # nightly: run for real, audit the claims
+```
+
+The key covers the **entire compiled classpath**, the case's accepted snapshots,
+locale/timezone, and `-p`. That is deliberately conservative: any code change
+invalidates every stamp. It over-invalidates, but it cannot *under*-invalidate,
+and the failure mode of over-invalidating is a wasted run rather than a green
+build for a tree nobody ran.
+
+`--require-stamps` writes no stamps, so CI can never mint its own proof. Use it
+on pull requests only — a merge commit's tree differs from the PR head whenever
+the base has moved, so no stamp exists for it and nobody can produce one ahead
+of time. **Run master with `--stamps`, never `--require-stamps`.**
+
+**Run `--verify-stamps` on a schedule before relying on any of this.** A cache
+cannot detect its own incomplete key — it believes its key by construction — so
+the only defence is an outside run that compares reality against the claims. It
+reports a stale stamp as a *key* problem, names the case, and deletes the
+offending stamp.
 
 ### Environment variables
 
