@@ -7,46 +7,62 @@ import scala.collection.mutable
 import scala.util.Try
 
 /**
- * Content-addressed test caching: a stamp records that a case PASSED for a
+ * Content-addressed test caching: an entry records that a case PASSED for a
  * given input hash, so a later run that hashes to the same value can skip it.
  * Same mechanism as Bazel and the Gradle build cache.
  *
- * ==Rule #1: a stamp is a CACHE WITH A FALLBACK, never an authority==
+ * ==Rule #1: an entry is a CACHE WITH A FALLBACK, never an authority==
  *
- * If the key does not match, run the test. If the stamp is missing, malformed,
+ * If the key does not match, run the test. If the entry is missing, malformed,
  * or unreadable, run the test. There is deliberately no code path anywhere in
- * this file where a missing or unparseable stamp can mean "passed" — the only
- * thing a stamp can do is let us SKIP work we can prove is unnecessary.
+ * this file where a missing or unparseable cache entry can mean "passed" — the only
+ * thing an entry can do is let us SKIP work we can prove is unnecessary.
  *
  * (CI may additionally choose to REFUSE to run on a miss and tell the developer
- * to run it locally — see `requireStamps` in TestRunnerConfig. That is a
+ * to run it locally — see `requireCache` in TestRunnerConfig. That is a
  * policy on top of this cache, and it is strictly safer than running: it
  * cannot turn a miss into a pass either.)
  *
  * ==The whole correctness question is: IS THE HASH COMPLETE?==
  *
- * An omitted input means a stale pass on a tree that would actually fail. So
- * this version is deliberately CONSERVATIVE — it hashes the whole compiled
- * classpath rather than a per-test dependency closure. That over-invalidates
- * (any engine change invalidates every stamp) but it cannot under-invalidate,
- * and the failure mode of over-invalidating is a wasted run, not a false pass.
+ * An omitted input means a stale pass on a tree that would actually fail, so
+ * every choice below is biased toward hashing too much rather than too little.
+ * The key has two halves:
  *
- * Hashing COMPILED OUTPUT rather than sources is deliberate too:
+ *   shared    main code + dependency jars, locale/timezone, -p   moves => rerun all
+ *   per case  that case's accepted snapshots, and the test code
+ *             its SUITE reaches                                  moves => rerun that suite
+ *
+ * The per-case half is what makes editing one test re-run one suite instead of
+ * the module. It is a REFINEMENT of a whole-classpath key: the suite's own
+ * compiled classes plus everything they reference, followed transitively
+ * through the class-file constant pool. That closure deliberately
+ * OVER-approximates — a reference through a shared helper drags in the helper's
+ * whole class. Over-approximating costs a needless re-run; under-approximating
+ * is a stale pass.
+ *
+ * Cross-module isolation needs no extra machinery: the classpath IS the module
+ * closure, so a module absent from the classpath cannot be in the key.
+ *
+ * Hashing COMPILED OUTPUT rather than sources is deliberate:
  *   - it is what actually executes, so it captures main code, test code,
  *     dependency version bumps and compiler-flag changes alike;
  *   - it needs no knowledge of the project's source layout;
  *   - it cannot drift from a second, hand-rolled notion of "what does this test
  *     depend on" — which is exactly how incomplete keys get shipped.
  *
- * Per-test granularity (read zinc's analysis for the real closure, so a change
- * to the SQL parser stops re-running storage suites) is the next step, and it
- * is a REFINEMENT of this key: it can only ever remove inputs that provably do
- * not affect a case. It must not be attempted without the nightly verifier.
+ * None of this is self-checking: a cache believes its own key by construction,
+ * so the only real defence is `--verify-cache` running the suite for real on a
+ * schedule and auditing what the cache claimed.
  */
-object TestStamp {
+object Fingerprint {
 
-  /** Bump when the key's *meaning* changes, so old stamps cannot match new
-    * semantics. Cheaper and safer than trying to migrate stamp files. */
+  /** Name of the committed manifest, in one place: it appears in the runner,
+    * in the CI failure message, and in .gitignore guidance. */
+  val ManifestName = "_test-cache.manifest"
+
+  /** Bump when the key's *meaning* changes, so old entries cannot match new
+    * semantics. Cheaper and safer than trying to migrate cache entries. */
   val KeyVersion = "1"
 
   private def sha256(): MessageDigest = MessageDigest.getInstance("SHA-256")
@@ -59,11 +75,11 @@ object TestStamp {
    *
    * PORTABLE BY CONSTRUCTION: the digest is derived from CONTENT ONLY — no
    * absolute path, no mtime, no ordering of the classpath. That is a hard
-   * requirement, not tidiness. A stamp is made on a developer's machine under
+   * requirement, not tidiness. An entry is made on a developer's machine under
    * `/home/x/project` and has to be honoured by CI under `/home/runner/work`,
    * where every absolute path differs, every mtime is a fresh checkout, and sbt
    * hands the run a background-job jar under an incrementing `job-N/` directory.
-   * Key on any of those and NO stamp ever matches anywhere but the machine that
+   * Key on any of those and NO cache entry ever matches anywhere but the machine that
    * wrote it, which makes the whole mechanism a no-op that looks like it works.
    *
    * Directories are hashed as (relative path, bytes) pairs; jars as their bytes.
@@ -147,11 +163,11 @@ object TestStamp {
   // Cross-MODULE isolation is already free: the key hashes the actual classpath,
   // and the classpath IS the module closure. `core` does not depend on `server`,
   // so server classes are not on a core test's classpath and cannot move its
-  // digest. Changing server already leaves core's stamps valid.
+  // digest. Changing server already leaves core's entries valid.
   //
   // What is NOT free is per-SUITE isolation inside a module: every suite's
   // compiled test classes live in the same test-classes directory, so hashing
-  // that directory wholesale means editing ONE test invalidates every stamp in
+  // that directory wholesale means editing ONE test invalidates every entry in
   // the module. This section fixes that by attributing test classes to the suite
   // that reaches them.
   //
@@ -267,15 +283,15 @@ object TestStamp {
     /** Digest of the test code a suite reaches.
       *
       * An empty closure means we could not find the suite's own compiled class,
-      * and a digest that does not depend on the test code is a stamp that
+      * and a digest that does not depend on the test code is an entry that
       * survives editing the test — the precise unsoundness this whole mechanism
       * exists to avoid. Refuse rather than return a constant. */
     def digestFor(suiteName: String): String = {
       val c = closure(suiteName)
       if (c.isEmpty)
         throw new IllegalStateException(
-          s"booktest stamps: no compiled class found for suite '$suiteName' among " +
-          s"${known.size} indexed test classes. Refusing to stamp it, because a key that " +
+          s"booktest cache: no compiled class found for suite '$suiteName' among " +
+          s"${known.size} indexed test classes. Refusing to cache it, because a key that " +
           "ignores the test code would keep passing after the test changed.")
       val md = sha256()
       c.toSeq.sorted.foreach { n =>
@@ -377,8 +393,8 @@ object TestStamp {
     // classpath, so an empty index means discovery failed.
     if (index.isEmpty)
       throw new IllegalStateException(
-        s"booktest stamps: found no compiled test classes among ${entries.length} classpath " +
-        "entries. Refusing to compute a stamp key, because a key that does not depend on " +
+        s"booktest cache: found no compiled test classes among ${entries.length} classpath " +
+        "entries. Refusing to compute an entry key, because a key that does not depend on " +
         "the code would cache forever.")
     Digests(
       classpath = classpathDigest(rest),
@@ -386,54 +402,27 @@ object TestStamp {
       testIndex = index)
   }
 
-  /** Where a case's stamp lives. Committed alongside the books, so a PR
-    * carries its own proof and a reviewer can see which stamps moved. */
-  def stampFile(stampRoot: Path, suitePath: os.RelPath, caseName: String): Path =
-    stampRoot / suitePath / s"$caseName.stamp"
-
-  /** True only if a stamp exists, parses, and records exactly this key.
-    * Every other outcome — absent, unreadable, malformed, different key — is
-    * false, i.e. "run the test". */
-  def matches(file: Path, key: String): Boolean =
-    Try {
-      os.exists(file) && os.read.lines(file).exists(_.trim == s"key=$key")
-    }.getOrElse(false)
-
-  def write(file: Path, key: String, suiteName: String, caseName: String): Unit =
-    Try {
-      os.makeDir.all(file / os.up)
-      os.write.over(
-        file,
-        Seq(
-          "# booktest result stamp — this case PASSED for the input hash below.",
-          "# A cache, not an authority: if the key does not match, the test runs.",
-          s"suite=$suiteName",
-          s"case=$caseName",
-          s"keyVersion=$KeyVersion",
-          s"key=$key",
-          ""
-        ).mkString("\n"))
-    }.getOrElse(())
-
-  /** Delete a stamp that has been proven wrong. Best-effort: failing to remove
-    * it must not fail the run, and the verifier has already recorded the
-    * violation, which is the part that matters. */
-  def invalidate(file: Path): Unit = Try(os.remove(file)).getOrElse(())
-
-  /** What CI prints when it refuses to run on a miss. */
-  def missingStampMessage(suiteName: String, caseName: String, runner: String): String =
-    s"""No valid result stamp for $suiteName/$caseName.
+  /** What CI prints when it refuses to run on a miss.
+    *
+    * This is the whole user experience of `--require-cache`, so it has to say
+    * what happened, why this job will not just run the test, and the exact two
+    * commands that fix it. */
+  def missingEntryMessage(suiteName: String, caseName: String, runner: String): String =
+    s"""No valid cache entry for $suiteName/$caseName.
        |
        |This job does not run the suite; it accepts a PR on the proof that the
-       |suite passed locally, for exactly this tree and environment. There is no
-       |stamp matching this input hash, so there is nothing to accept.
+       |suite passed locally, for exactly this tree and environment. No entry
+       |matches this fingerprint, so there is nothing to accept.
        |
-       |Run it locally and commit the stamps it writes:
+       |Run the suite locally with the cache enabled and commit the manifest
+       |it writes (running more than this one case is fine — one manifest
+       |holds them all):
        |
        |    $runner
-       |    git add '**/*.stamp' && git commit
+       |    git add '**/$ManifestName' && git commit
        |
-       |A stamp is invalidated by any change to the compiled classpath (so any
-       |code change invalidates all of them, for now), to this case's accepted
-       |snapshots, or to locale/timezone/parallelism.""".stripMargin
+       |An entry is invalidated by a change to the main code or dependencies (which
+       |invalidates all of them), to the test code this suite reaches (which
+       |invalidates this suite), to this case's accepted snapshots, or to
+       |locale/timezone/parallelism.""".stripMargin
 }

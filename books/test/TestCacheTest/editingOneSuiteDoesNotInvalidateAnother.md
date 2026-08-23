@@ -13,19 +13,19 @@ snapshot diff on every unrelated change and teach the reviewer to ignore it.
 
 If two suites hashed alike, editing one would invalidate the other and the
 granularity would be fictional.
-[OK] StampPasser and StampFailer hash differently: PASS
+[OK] CachePasser and CacheFailer hash differently: PASS
 
 ## 2. A suite that drives another DEPENDS on it
 
 This test class instantiates both helper suites, so both must appear in its
 closure. Miss that edge and editing a helper leaves a stale pass for its driver —
 the under-approximation that makes a cache lie.
-[OK] TestStampTest's closure contains StampPasser: PASS
-[OK] TestStampTest's closure contains StampFailer: PASS
+[OK] TestCacheTest's closure contains CachePasser: PASS
+[OK] TestCacheTest's closure contains CacheFailer: PASS
 
 ## 3. ...but the dependency is not symmetric
 
 The helper must NOT reach back into its driver. Without this asymmetry every
 suite would transitively reach every other and the closure would be the module.
-[OK] StampPasser's closure excludes TestStampTest: PASS
+[OK] CachePasser's closure excludes TestCacheTest: PASS
 [OK] the driver's closure is strictly larger than the helper's: PASS

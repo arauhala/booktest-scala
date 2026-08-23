@@ -28,25 +28,25 @@ case class RunConfig(
   exactFilter: Boolean = false,  // true when filter comes from path resolution (SuiteName/testCase)
   booktestConfig: BooktestConfig = BooktestConfig.empty,  // test-root and groups config
   invalidateLiveOnFail: Boolean = false,  // --invalidate-live-on-fail
-  // Content-addressed result cache (see TestStamp). A stamp records that a case
-  // PASSED for a given input hash; a matching stamp lets us skip the work.
-  //   --stamps          consult and write stamps; a MISS RUNS THE TEST.
-  //   --require-stamps  consult stamps; a MISS FAILS with instructions instead
+  // Content-addressed result cache (see Fingerprint). An entry records that a case
+  // PASSED for a given input hash; a matching cache entry lets us skip the work.
+  //   --cache          consult and write cache entries; a MISS RUNS THE TEST.
+  //   --require-cache  consult cache entries; a MISS FAILS with instructions instead
   //                     of running. For CI, whose whole purpose is to NOT run
   //                     the suite — running it on a miss would mean paying for
   //                     the local run and the CI run both. Strictly safer than
   //                     running: it cannot turn a miss into a pass either.
-  // Neither flag has a path where a missing or malformed stamp means "passed".
-  useStamps: Boolean = false,
-  requireStamps: Boolean = false,
-  // --verify-stamps: THE ORACLE. Run every case from scratch, consulting no
-  // cache, and compare the real verdict against what the stamps CLAIM. A stamp
+  // Neither flag has a path where a missing or malformed cache entry means "passed".
+  useCache: Boolean = false,
+  requireCache: Boolean = false,
+  // --verify-cache: THE ORACLE. Run every case from scratch, consulting no
+  // cache, and compare the real verdict against what the entries CLAIM. An entry
   // that says "passed" for a case that now fails at the same key means the key
   // is INCOMPLETE — some input changed that the hash does not cover. Without
   // this, an incomplete key is discovered months later, as a mystery; with it,
   // the same night, as a named case. Intended to run nightly, from scratch.
-  verifyStamps: Boolean = false,
-  stampDir: Option[Path] = None,  // default: <snapshotDir>/_stamps
+  verifyCache: Boolean = false,
+  cacheDir: Option[Path] = None,  // default: <snapshotDir>/_cache entries
   // --trace / BOOKTEST_TRACE=1: also write the structured event log to
   // <outputDir>/.booktest.log. The runner always keeps a bounded
   // in-memory ring buffer (used to attach a "Trace context" block to
@@ -248,36 +248,36 @@ class TestRunner(config: RunConfig = RunConfig()) {
   
   /** Run-wide input digests for the result cache. Computed ONCE (the classpath
     * hash walks every compiled class) and shared by every case. `lazy` so a run
-    * with stamps disabled never pays for it. */
-  private lazy val stampDigests: TestStamp.Digests = TestStamp.digests(config.threads)
+    * with cache entries disabled never pays for it. */
+  private lazy val fingerprint: Fingerprint.Digests = Fingerprint.digests(config.threads)
 
-  /** Cases where a stamp claimed a pass that a real run did not reproduce.
+  /** Cases where an entry claimed a pass that a real run did not reproduce.
     * Non-empty means the KEY is incomplete — a far more serious finding than
     * any single failing case. Mutable and synchronised: -pN runs cases on
     * several threads. */
-  private val stampViolations = scala.collection.mutable.ListBuffer[String]()
+  private val cacheViolations = scala.collection.mutable.ListBuffer[String]()
 
-  /** Names of cases whose stamp lied, for the caller/report. */
-  def staleStamps: List[String] = stampViolations.synchronized { stampViolations.toList }
+  /** Names of cases whose cache entry lied, for the caller/report. */
+  def staleCacheEntries: List[String] = cacheViolations.synchronized { cacheViolations.toList }
 
-  /** One manifest for the whole run, not a file per case — see StampStore for
+  /** One manifest for the whole run, not a file per case — see CacheManifest for
     * why (a file per case makes every code commit a ~2,400-file diff). */
-  private lazy val stampStore: StampStore =
-    new StampStore(config.stampDir.getOrElse(config.snapshotDir / "_stamps.manifest"), stampDigests)
+  private lazy val cacheManifest: CacheManifest =
+    new CacheManifest(config.cacheDir.getOrElse(config.snapshotDir / Fingerprint.ManifestName), fingerprint)
 
   /**
    * Result-cache wrapper around the real runner.
    *
    * Deliberately a WRAPPER: `runTestCaseUncached` has several return paths
    * (snapshot verdict, explicit fail, exception) inside one try/catch/finally,
-   * and a stamp must be written on exactly one of them. Wrapping means the
+   * and an entry must be written on exactly one of them. Wrapping means the
    * write cannot miss a path, and the skip decision is made before any work.
    *
-   * Never turns a miss into a pass. A miss either runs the test (--stamps) or
-   * refuses and says how to produce the stamp (--require-stamps).
+   * Never turns a miss into a pass. A miss either runs the test (--cache) or
+   * refuses and says how to produce the entry (--require-cache).
    */
   def runTestCase(testCase: TestCase, suiteName: String, suite: TestSuite = null): TestResult = {
-    if (!config.useStamps && !config.requireStamps && !config.verifyStamps)
+    if (!config.useCache && !config.requireCache && !config.verifyCache)
       return runTestCaseUncached(testCase, suiteName, suite)
 
     val suitePathSegments = os.RelPath(config.getSuitePath(suiteName))
@@ -285,33 +285,33 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val fullName = s"$suiteName/${testCase.name}"
     // Covers this case's snapshots AND the test code its suite reaches, so an
     // edit to one test file invalidates that suite rather than the module.
-    val snapDigest = stampDigests.caseDigest(suiteName, testCase.name, snapshotDir)
+    val snapDigest = fingerprint.caseDigest(suiteName, testCase.name, snapshotDir)
 
-    val claimed = stampStore.matches(fullName, snapDigest)
+    val claimed = cacheManifest.matches(fullName, snapDigest)
 
-    if (config.verifyStamps) {
+    if (config.verifyCache) {
       // The oracle: consult NOTHING, run for real, then hold the result up
-      // against the claim. Deliberately does not write or refresh stamps — an
+      // against the claim. Deliberately does not write or refresh cache entries — an
       // oracle that also produces the thing it audits is not an oracle.
       val real = runTestCaseUncached(testCase, suiteName, suite)
       if (claimed && !real.passed) {
         // The cache would have skipped a case that does not pass. That is the
         // failure this mode exists to catch, and it is louder than the test
         // failure itself: it means the KEY is wrong, not just this case.
-        stampViolations.synchronized { stampViolations += fullName }
-        stampStore.invalidate(fullName)   // a stamp that has lied once must not lie again
-        stampStore.flush()
+        cacheViolations.synchronized { cacheViolations += fullName }
+        cacheManifest.invalidate(fullName)   // an entry that has lied once must not lie again
+        cacheManifest.flush()
         return real.copy(diff = Some(
-          s"""STALE STAMP — THE CACHE KEY IS INCOMPLETE.
+          s"""STALE CACHE ENTRY — THE CACHE KEY IS INCOMPLETE.
              |
-             |A stamp claimed $fullName passes for the current input hash, but a
+             |An entry claimed $fullName passes for the current input hash, but a
              |from-scratch run of it did not pass. Some input that affects this
              |result is NOT part of the key, so the cache would have reported
              |success for a tree that fails.
              |
-             |The offending stamp has been deleted. Do not "fix" this by
-             |re-stamping: find the missing input and add it to TestStamp's key
-             |(and bump TestStamp.KeyVersion).
+             |The offending cache entry has been deleted. Do not "fix" this by
+             |re-caching: find the missing input and add it to Fingerprint's key
+             |(and bump Fingerprint.KeyVersion).
              |
              |Underlying failure:
              |""".stripMargin + real.diff.getOrElse("(no diff)")))
@@ -326,20 +326,23 @@ class TestRunner(config: RunConfig = RunConfig()) {
                         output = "", diff = None, durationMs = 0)
     }
 
-    if (config.requireStamps) {
+    if (config.requireCache) {
       return TestResult(testName = fullName, passed = false, successState = SuccessState.FAIL,
                         output = "",
-                        diff = Some(TestStamp.missingStampMessage(suiteName, testCase.name,
-                          s"booktest $fullName")),
+                        // The suggested command MUST carry the cache flag: without
+                        // it the local run writes no manifest and the developer
+                        // loops on the same failure.
+                        diff = Some(Fingerprint.missingEntryMessage(suiteName, testCase.name,
+                          s"booktest -C $suiteName")),
                         durationMs = 0)
     }
 
     val result = runTestCaseUncached(testCase, suiteName, suite)
-    // Write ONLY on a genuine pass. A DIFF or FAIL must leave no stamp, or the
+    // Write ONLY on a genuine pass. A DIFF or FAIL must leave no entry, or the
     // next run would skip a case that never passed.
     if (result.passed && result.successState == SuccessState.OK) {
-      stampStore.record(fullName, snapDigest)
-      stampStore.flush()
+      cacheManifest.record(fullName, snapDigest)
+      cacheManifest.flush()
     }
     result
   }
@@ -1544,7 +1547,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
     *
     * Events are pulled from the always-on `ringBuffer` for: the test
     * itself, every live resource it transitively reaches, and every
-    * test producer in that resource closure. Sorted by timestamp so
+    * test producer in that resource closure. Sorted by timecache entry so
     * the reader sees the chronological order across worker threads. */
   private def attachTraceBlock(r: TestResult, deps: Iterable[String]): TestResult = {
     if (r.passed || config.threads <= 1) return r

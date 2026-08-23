@@ -197,7 +197,7 @@ design and a worked example.
 |--------|-------------|
 | `-v, --verbose` | Verbose output |
 | `-pN` | Parallel execution with N threads |
-| `-c, --continue` | Skip tests that passed in previous run |
+| `-c, --continue` | Skip tests that passed in the previous run |
 | `-i, --interactive` | Interactive mode for snapshot updates |
 | `-l, --list` | List test cases |
 | `-L, --logs` | Show test logs |
@@ -217,25 +217,29 @@ design and a worked example.
 | `--clean` | Remove orphan files and tmp directories |
 | `--invalidate-live-on-fail` | Force-close shared live resources after a consumer fails |
 | `--capacity NAME=VALUE` | Override a `capacity(NAME, _)` total at runtime |
-| `--stamps` | Consult and write result stamps; **a miss runs the test** |
-| `--require-stamps` | Consult stamps; **a miss fails** with instructions instead of running |
-| `--verify-stamps` | Run everything from scratch and audit what the stamps claim |
+| `-C, --cache` | Consult and write cache entries; **a miss runs the test** |
+| `--require-cache` | Consult cache entries; **a miss fails** with instructions instead of running |
+| `--verify-cache` | Run everything from scratch and audit what the entries claim |
 
-### Result stamps (content-addressed test cache)
+### Result cache (content-addressed)
 
-A stamp records that a case **passed for a given input hash**, so a later run
+An entry records that a case **passed for a given input hash**, so a later run
 that hashes to the same value can skip it — the Bazel / Gradle build-cache idea.
 The point is to let a PR be accepted on the proof that the suite passed locally,
 while master and deployment keep running everything.
 
-**A stamp is a cache with a fallback, never an authority.** Absent, malformed,
+**An entry is a cache with a fallback, never an authority.** Absent, malformed,
 unreadable, or a different key all mean *run the test*. There is no code path
-where a bad stamp means "passed".
+where a bad cache entry means "passed".
+
+`-c` and `-C` are siblings on purpose: `-c` skips what passed in the **last
+run**, `-C` skips what passed for **these inputs, ever**. `-c` is a convenience
+that trusts the previous run; `-C` is a proof that names every input it trusts.
 
 ```bash
-booktest --stamps            # local: skip what is provably unchanged
-booktest --require-stamps    # CI: refuse to run; accept the proof or fail
-booktest --verify-stamps     # nightly: run for real, audit the claims
+booktest -C                 # local: skip what is provably unchanged
+booktest --require-cache    # CI: refuse to run; accept the proof or fail
+booktest --verify-cache     # nightly: run for real, audit the claims
 ```
 
 The key is in two halves:
@@ -257,25 +261,25 @@ Cross-module isolation comes free from the same mechanism: the classpath *is*
 the module closure, so a module that isn't on the classpath can't be in the key.
 
 **The key is portable by construction** — derived from content only, never from
-absolute paths, mtimes, or classpath order. This is what lets a stamp written on
+absolute paths, mtimes, or classpath order. This is what lets an entry written on
 a laptop be honoured on a CI runner, where every path differs and a fresh
 checkout has fresh mtimes. `classpathDigestIsPortable` pins it.
 
 **Nothing degrades quietly.** If the classpath can't be discovered, or a suite's
-compiled class isn't found, stamping *refuses* with an explanation rather than
+compiled class isn't found, caching *refuses* with an explanation rather than
 falling back to a constant — a key that doesn't depend on the code is a cache
 that answers "cached" for code it has never seen.
 
-`--require-stamps` writes no stamps, so CI can never mint its own proof. Use it
+`--require-cache` writes nothing, so CI can never mint its own proof. Use it
 on pull requests only — a merge commit's tree differs from the PR head whenever
-the base has moved, so no stamp exists for it and nobody can produce one ahead
-of time. **Run master with `--stamps`, never `--require-stamps`.**
+the base has moved, so no entry exists for it and nobody can produce one ahead
+of time. **Run master with `--cache`, never `--require-cache`.**
 
-**Run `--verify-stamps` on a schedule before relying on any of this.** A cache
+**Run `--verify-cache` on a schedule before relying on any of this.** A cache
 cannot detect its own incomplete key — it believes its key by construction — so
 the only defence is an outside run that compares reality against the claims. It
-reports a stale stamp as a *key* problem, names the case, and deletes the
-offending stamp.
+reports a stale entry as a *key* problem, names the case, and deletes the
+offending cache entry.
 
 ### Environment variables
 
