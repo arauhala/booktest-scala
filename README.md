@@ -197,7 +197,7 @@ design and a worked example.
 |--------|-------------|
 | `-v, --verbose` | Verbose output |
 | `-pN` | Parallel execution with N threads |
-| `-c, --continue` | Skip tests that passed in previous run |
+| `-c, --continue` | Skip tests that passed in the previous run |
 | `-i, --interactive` | Interactive mode for snapshot updates |
 | `-l, --list` | List test cases |
 | `-L, --logs` | Show test logs |
@@ -217,6 +217,69 @@ design and a worked example.
 | `--clean` | Remove orphan files and tmp directories |
 | `--invalidate-live-on-fail` | Force-close shared live resources after a consumer fails |
 | `--capacity NAME=VALUE` | Override a `capacity(NAME, _)` total at runtime |
+| `-C, --cache` | Consult and write cache entries; **a miss runs the test** |
+| `--require-cache` | Consult cache entries; **a miss fails** with instructions instead of running |
+| `--verify-cache` | Run everything from scratch and audit what the entries claim |
+
+### Result cache (content-addressed)
+
+An entry records that a case **passed for a given input hash**, so a later run
+that hashes to the same value can skip it — the Bazel / Gradle build-cache idea.
+The point is to let a PR be accepted on the proof that the suite passed locally,
+while master and deployment keep running everything.
+
+**An entry is a cache with a fallback, never an authority.** Absent, malformed,
+unreadable, or a different key all mean *run the test*. There is no code path
+where a bad cache entry means "passed".
+
+`-c` and `-C` are siblings on purpose: `-c` skips what passed in the **last
+run**, `-C` skips what passed for **these inputs, ever**. `-c` is a convenience
+that trusts the previous run; `-C` is a proof that names every input it trusts.
+
+```bash
+booktest -C                 # local: skip what is provably unchanged
+booktest --require-cache    # CI: refuse to run; accept the proof or fail
+booktest --verify-cache     # nightly: run for real, audit the claims
+```
+
+The key is in two halves:
+
+| half | covers | moving it re-runs |
+|---|---|---|
+| shared | main code + dependency jars, locale/timezone, `-p` | everything |
+| per case | that case's accepted snapshots, and the **test code its suite reaches** | that suite |
+
+So editing one test file re-runs that suite, not the module — the suite's own
+compiled classes plus everything they reference, followed transitively through
+the constant pool. Editing main code still invalidates everything, which is
+correct: main code is upstream of every suite. The closure deliberately
+**over**-approximates (a reference through a shared helper pulls the helper's
+whole class in). Over-approximating costs a needless re-run; under-approximating
+is a stale pass, so the bias is the safe one.
+
+Cross-module isolation comes free from the same mechanism: the classpath *is*
+the module closure, so a module that isn't on the classpath can't be in the key.
+
+**The key is portable by construction** — derived from content only, never from
+absolute paths, mtimes, or classpath order. This is what lets an entry written on
+a laptop be honoured on a CI runner, where every path differs and a fresh
+checkout has fresh mtimes. `classpathDigestIsPortable` pins it.
+
+**Nothing degrades quietly.** If the classpath can't be discovered, or a suite's
+compiled class isn't found, caching *refuses* with an explanation rather than
+falling back to a constant — a key that doesn't depend on the code is a cache
+that answers "cached" for code it has never seen.
+
+`--require-cache` writes nothing, so CI can never mint its own proof. Use it
+on pull requests only — a merge commit's tree differs from the PR head whenever
+the base has moved, so no entry exists for it and nobody can produce one ahead
+of time. **Run master with `--cache`, never `--require-cache`.**
+
+**Run `--verify-cache` on a schedule before relying on any of this.** A cache
+cannot detect its own incomplete key — it believes its key by construction — so
+the only defence is an outside run that compares reality against the claims. It
+reports a stale entry as a *key* problem, names the case, and deletes the
+offending cache entry.
 
 ### Environment variables
 
