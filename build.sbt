@@ -38,7 +38,14 @@ ThisBuild / publishTo := sonatypePublishToBundle.value
 // supply one that prompts on the TERMINAL (`gpg-loopback`) instead of asking
 // gpg-agent for a pinentry program — see the long comment in shell.nix.
 // Defaults to plain `gpg`, so nothing changes outside that shell.
-ThisBuild / com.jsuereth.sbtpgp.PgpKeys.gpgCommand := sys.env.getOrElse("GPG_COMMAND", "gpg")
+//
+// GLOBAL scope, not ThisBuild: sbt-pgp defines gpgCommand in its
+// globalSettings and builds `pgpSigner` there, so it reads the value in
+// Global. A ThisBuild override resolves fine if you `show gpgCommand` — which
+// is why it looked correct — but the signer never sees it, and sbt says so:
+// "there's a key that's not used by any other settings/tasks: ThisBuild /
+// gpgCommand". Verify with `show pgpSigner`, not `show gpgCommand`.
+Global / com.jsuereth.sbtpgp.PgpKeys.gpgCommand := sys.env.getOrElse("GPG_COMMAND", "gpg")
 
 lazy val root = (project in file("."))
   .settings(
