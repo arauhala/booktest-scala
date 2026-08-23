@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.4.10 (2026-08-23)
+
+### Fix: the cache key still depended on how the BUILD TOOL was installed
+
+`java.class.path` under sbt is literally `sbt-launch.jar`, so the launcher's
+bytes were part of the key. They depend on how sbt was installed — a CI runner
+downloading 1.10.5 versus a developer on nixpkgs' 1.12.11 — while both build
+identical code with the same compiler, pinned by `project/build.properties`.
+Every cache entry was therefore machine-specific for a reason unrelated to the
+code under test.
+
+Measured on a real consumer: of 121 classpath entries, this was the ONLY
+genuine difference between a laptop and a runner. Excluding it makes both
+halves of the key agree across machines — verified before release by applying
+the rule to per-entry digests captured on both: 119 entries each, identical key,
+and all 181 per-suite closure digests already matched.
+
+### Fix: an unreadable classpath entry silently contributed NOTHING to the key
+
+0.4.9 hashes jars by content, but wrapped the read in a `Try` that yielded
+`None` on failure — so any classpath file that is not a readable zip was
+silently dropped from the key, and changes to it could never invalidate the
+cache. A stale pass waiting to happen, and invisible. It now falls back to
+hashing the raw bytes.
+
+### Fix: a run could die without saying why
+
+The runner catches `NonFatal`, which by design does not catch
+`OutOfMemoryError` and friends. On that path the log capture is never torn
+down, so the JVM's own uncaught-exception trace goes to `System.err` — which is
+still that thread's capture buffer. Runs died with no stack trace, no summary
+and no clue. Uncaught throwables now go to the real console, bypassing any
+capture.
+
+
 ## 0.4.9 (2026-08-23)
 
 ### Fix: the key was machine-specific, because jars were hashed as FILES

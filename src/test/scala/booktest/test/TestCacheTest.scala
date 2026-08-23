@@ -478,4 +478,54 @@ class TestCacheTest extends TestSuite {
     check(t, "changing one byte inside an entry changes the digest",
       Fingerprint.classpathDigest(Seq(dir / "three.jar")) != d1)
   }
+
+  /** The build tool's own launcher must not be part of the key.
+    *
+    * `java.class.path` under sbt is literally `sbt-launch.jar`, whose bytes
+    * depend on how sbt was installed — a CI runner on 1.10.5 versus a developer
+    * on nixpkgs' 1.12.11 — while both build identical code with the identical
+    * pinned compiler. Measured on a real consumer: of 121 classpath entries,
+    * this was the ONLY genuine difference between laptop and runner. */
+  def testBuildToolBootstrapIsNotPartOfTheKey(t: TestCaseRun): Unit = {
+    t.h1("sbt's own launcher is excluded from the key")
+
+    val dir = t.tmpDir("bootstrap")
+    os.makeDir.all(dir / "a"); os.makeDir.all(dir / "b")
+
+    // Two "installations" of the build tool: same name, different bytes.
+    os.write.over(dir / "a" / "sbt-launch.jar", "launcher version A")
+    os.write.over(dir / "b" / "sbt-launch.jar", "launcher version B")
+    // Plus one real dependency, identical in both.
+    os.write.over(dir / "a" / "dep.jar", "real dependency")
+    os.write.over(dir / "b" / "dep.jar", "real dependency")
+
+    check(t, "the two launchers genuinely differ",
+      os.read(dir / "a" / "sbt-launch.jar") != os.read(dir / "b" / "sbt-launch.jar"))
+
+    val da = Fingerprint.digests(1)
+    // classpathDigest is fed the already-filtered list by `digests`, so assert
+    // the filter itself as well as the effect.
+    check(t, "the launcher is recognised as build-tool bootstrap",
+      Fingerprint.isBuildToolBootstrap(dir / "a" / "sbt-launch.jar"))
+    check(t, "a real jar is not",
+      !Fingerprint.isBuildToolBootstrap(dir / "a" / "dep.jar"))
+
+    val withA = Fingerprint.classpathDigest(
+      Seq(dir / "a" / "dep.jar", dir / "a" / "sbt-launch.jar").filterNot(Fingerprint.isBuildToolBootstrap))
+    val withB = Fingerprint.classpathDigest(
+      Seq(dir / "b" / "dep.jar", dir / "b" / "sbt-launch.jar").filterNot(Fingerprint.isBuildToolBootstrap))
+    check(t, "two different launchers give the same key", withA == withB)
+
+    // And a real dependency change must still move it.
+    //
+    // This also pins a silent-failure fix: `dep.jar` here is NOT a valid zip,
+    // and jar reading used to be wrapped in a Try that returned None on
+    // failure — so an unreadable entry contributed NOTHING to the key and
+    // changes to it could never invalidate the cache. It now falls back to
+    // hashing the raw bytes. This check failed for exactly that reason when
+    // first written.
+    os.write.over(dir / "b" / "dep.jar", "real dependency, changed")
+    val changed = Fingerprint.classpathDigest(Seq(dir / "b" / "dep.jar"))
+    check(t, "changing a real dependency still changes the key", changed != withA)
+  }
 }

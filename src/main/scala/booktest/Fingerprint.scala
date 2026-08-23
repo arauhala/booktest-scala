@@ -110,6 +110,15 @@ object Fingerprint {
       //
       // Sorted (entry name, bytes) is stable under all of that, and is exactly
       // the content that determines behaviour.
+      // Not every classpath file is a readable zip. Falling back to raw bytes
+      // keeps such an entry IN the key: silently skipping it (the previous
+      // behaviour, via Try) meant changes to it could never invalidate the
+      // cache — a stale pass waiting to happen, and invisible.
+      val isZip = Try {
+        val in = new java.io.DataInputStream(new java.io.FileInputStream(path.toIO))
+        try in.readInt() == 0x504b0304 finally in.close()
+      }.getOrElse(false)
+      if (!isZip) Some(hex(sha256().digest(os.read.bytes(path)))) else {
       val jar = new java.util.jar.JarFile(path.toIO)
       try {
         val md = sha256()
@@ -132,7 +141,7 @@ object Fingerprint {
           } finally in.close()
         }
         Some(hex(md.digest()))
-      } finally jar.close()
+      } finally jar.close() }
     } else {
       // Absent entry: contributes no classes, so it contributes nothing to the
       // key. Recording its path here would only make the key machine-specific.
@@ -356,6 +365,23 @@ object Fingerprint {
     * code, i.e. a cache that never invalidates. So walk the loader chain, which
     * is the real answer in both forked and unforked mode, and union it with the
     * system property for the forked case. */
+  /** The build tool's own bootstrap, which is on the classpath by accident of
+    * how the tests are launched — not because it affects them.
+    *
+    * `java.class.path` under sbt is literally `sbt-launch.jar`, and its bytes
+    * depend on how sbt was INSTALLED: a CI runner downloading 1.10.5 and a
+    * developer on nixpkgs' 1.12.11 have different launchers while building the
+    * exact same code with the exact same compiler. Keying on it makes every
+    * cache entry machine-specific for a reason that has nothing to do with the
+    * code under test. Measured on aito-core: of 121 classpath entries, this was
+    * the only genuine difference between a laptop and a runner.
+    *
+    * The sbt version that actually builds is pinned by project/build.properties
+    * and its jars (compiler-interface, scala-library, …) appear as separate
+    * entries, so dropping the launcher loses no real input. */
+  private[booktest] def isBuildToolBootstrap(p: Path): Boolean =
+    p.last == "sbt-launch.jar"
+
   def runtimeClasspathEntries(): Seq[Path] = {
     val out = mutable.LinkedHashSet[Path]()
     var cl: ClassLoader = getClass.getClassLoader
@@ -418,7 +444,8 @@ object Fingerprint {
 
     // Test-class directories are indexed per suite; everything else — main
     // output and jars — is the shared digest.
-    val (testArtifacts, rest) = entries.partition(isTestArtifact)
+    val (testArtifacts, rest0) = entries.partition(isTestArtifact)
+    val rest = rest0.filterNot(isBuildToolBootstrap)
     val index = new TestIndex(testArtifacts)
     // A classpath we could not read is a classpath we cannot key on, and a
     // constant key answers "cached" for code it has never seen. The test index

@@ -43,6 +43,27 @@ private[booktest] object OutputMux {
       realErr = System.err
       System.setOut(new PrintStream(new MuxOutputStream(outSink, realOut), true))
       System.setErr(new PrintStream(new MuxOutputStream(errSink, realErr), true))
+
+      // A capture must never be able to swallow the reason a run died.
+      //
+      // Test bodies run inside a capture, and the runner's catch is NonFatal —
+      // which by design does NOT catch OutOfMemoryError and friends. A fatal
+      // error therefore escapes without the capture being torn down, and the
+      // JVM's default handler writes the stack trace to System.err, which is
+      // still this thread's capture buffer. The run dies with no trace, no
+      // summary and no clue; we lost a CI run to exactly that.
+      //
+      // Route uncaught throwables to the real console, bypassing any sink.
+      val previous = Thread.getDefaultUncaughtExceptionHandler
+      Thread.setDefaultUncaughtExceptionHandler((t, e) => {
+        try {
+          realErr.println(s"booktest: uncaught ${e.getClass.getName} on thread '${t.getName}'")
+          e.printStackTrace(realErr)
+          realErr.flush()
+        } catch { case _: Throwable => () }
+        if (previous != null) previous.uncaughtException(t, e)
+      })
+
       installed = true
     }
   }
