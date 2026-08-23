@@ -177,6 +177,37 @@ class MethodRefTests extends TestSuite {
 
 ## Advanced Features
 
+### Result cache (`-C` / `--require-cache` / `--verify-cache`)
+
+A cache entry records that a case **passed for a given input hash**, so a later
+run that hashes the same can skip it. `Fingerprint` computes the key,
+`CacheManifest` stores it in one committed `_test-cache.manifest` per snapshot
+root.
+
+**Rule #1: it is a cache with a fallback, never an authority.** Absent,
+malformed, unreadable, or a different key all mean *run the test*. There is no
+path where a bad entry means "passed". When changing anything here, keep it
+that way, and remember a cache cannot detect its own incomplete key — the only
+defence is `--verify-cache` running for real and auditing the claims.
+
+Two traps this code has already fallen into, both now covered by
+`TestCacheTest`:
+
+- **`-pN` takes a separate execution path.** `runTestsParallel` ->
+  `executeTestSilently` does not go through `runTestCase`. Both now share
+  `withCache`; if you add a third execution path, route it through `withCache`
+  too, or the cache silently does nothing there.
+- **Assertions must prove the cache was USED, not that verdicts look right.**
+  A bypassed run does the work and reaches the same verdict, so "the run
+  passed" and "the gated run failed" hold either way. Prove consultation with a
+  case that cannot pass (forge an entry; a consulted cache skips it), and prove
+  the gate with cases that would pass if run.
+
+The key must stay **portable**: content only, never absolute paths, mtimes, or
+classpath order — otherwise an entry written on a laptop can never be honoured
+in CI, which is the whole point. `classpathDigestIsPortable` pins this.
+
+
 ### HTTP Snapshotting
 ```scala
 // Capture HTTP requests/responses as JSON snapshots

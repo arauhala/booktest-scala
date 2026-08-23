@@ -315,7 +315,10 @@ class TestCacheTest extends TestSuite {
     val err = try {
       d.digestFor_forTest("no.such.Suite"); "no exception"
     } catch { case e: IllegalStateException => e.getMessage }
-    t.tln(err)
+    // Redact the class COUNT: it is genuinely useful in a real error message,
+    // but printing it here makes this snapshot diff every time a test suite is
+    // added anywhere in the repo — a book that cries wolf.
+    t.tln(err.replaceAll("among \\d+ indexed", "among <N> indexed"))
     assert(err.contains("no compiled class found"), "must name the actual problem")
     assert(err.contains("no.such.Suite"), "must name the suite")
   }
