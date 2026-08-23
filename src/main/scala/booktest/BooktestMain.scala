@@ -27,6 +27,8 @@ object BooktestMain {
     var continueMode = false  // -c: continue from last run, skip successful tests
     var refreshDeps = false  // -r: force re-run of transitive deps (default: load from .bin if present)
     var threads = 1  // -p N: number of threads for parallel execution
+    var useStamps = false
+    var requireStamps = false
     var garbageMode = false  // --garbage: list orphan files
     var cleanMode = false  // --clean: remove orphan files and temp directories
     var rootOverride: Option[String] = None  // --root: package prefix to strip from paths
@@ -54,6 +56,8 @@ object BooktestMain {
         case "-a" | "--accept" => autoAcceptDiff = true  // Auto-accept DIFF tests
         case "-c" | "--continue" => continueMode = true  // Continue from last run
         case "-r" | "--refresh-deps" => refreshDeps = true  // Force re-run of transitive deps
+        case "--stamps" => useStamps = true      // consult+write result stamps; MISS RUNS THE TEST
+        case "--require-stamps" => requireStamps = true  // MISS FAILS with instructions (CI)
         case "--garbage" => garbageMode = true  // List orphan files in books/
         case "--clean" => cleanMode = true  // Remove orphan files and .tmp directories
         case "--setup" => setupMode = true  // Interactive personal tool config
@@ -174,6 +178,8 @@ object BooktestMain {
       threads = threads,
       booktestConfig = booktestConfig,
       invalidateLiveOnFail = invalidateLiveOnFail,
+      useStamps = useStamps,
+      requireStamps = requireStamps,
       trace = traceFlag
     )
 

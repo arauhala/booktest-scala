@@ -28,6 +28,18 @@ case class RunConfig(
   exactFilter: Boolean = false,  // true when filter comes from path resolution (SuiteName/testCase)
   booktestConfig: BooktestConfig = BooktestConfig.empty,  // test-root and groups config
   invalidateLiveOnFail: Boolean = false,  // --invalidate-live-on-fail
+  // Content-addressed result cache (see TestStamp). A stamp records that a case
+  // PASSED for a given input hash; a matching stamp lets us skip the work.
+  //   --stamps          consult and write stamps; a MISS RUNS THE TEST.
+  //   --require-stamps  consult stamps; a MISS FAILS with instructions instead
+  //                     of running. For CI, whose whole purpose is to NOT run
+  //                     the suite — running it on a miss would mean paying for
+  //                     the local run and the CI run both. Strictly safer than
+  //                     running: it cannot turn a miss into a pass either.
+  // Neither flag has a path where a missing or malformed stamp means "passed".
+  useStamps: Boolean = false,
+  requireStamps: Boolean = false,
+  stampDir: Option[Path] = None,  // default: <snapshotDir>/_stamps
   // --trace / BOOKTEST_TRACE=1: also write the structured event log to
   // <outputDir>/.booktest.log. The runner always keeps a bounded
   // in-memory ring buffer (used to attach a "Trace context" block to
@@ -227,7 +239,58 @@ class TestRunner(config: RunConfig = RunConfig()) {
     runSuiteWithFilter(suite, Set.empty)
   }
   
+  /** Run-wide input digests for the result cache. Computed ONCE (the classpath
+    * hash walks every compiled class) and shared by every case. `lazy` so a run
+    * with stamps disabled never pays for it. */
+  private lazy val stampDigests: TestStamp.Digests = TestStamp.digests(config.threads)
+
+  private def stampRoot: Path = config.stampDir.getOrElse(config.snapshotDir / "_stamps")
+
+  /**
+   * Result-cache wrapper around the real runner.
+   *
+   * Deliberately a WRAPPER: `runTestCaseUncached` has several return paths
+   * (snapshot verdict, explicit fail, exception) inside one try/catch/finally,
+   * and a stamp must be written on exactly one of them. Wrapping means the
+   * write cannot miss a path, and the skip decision is made before any work.
+   *
+   * Never turns a miss into a pass. A miss either runs the test (--stamps) or
+   * refuses and says how to produce the stamp (--require-stamps).
+   */
   def runTestCase(testCase: TestCase, suiteName: String, suite: TestSuite = null): TestResult = {
+    if (!config.useStamps && !config.requireStamps) return runTestCaseUncached(testCase, suiteName, suite)
+
+    val suitePathSegments = os.RelPath(config.getSuitePath(suiteName))
+    val snapshotDir = config.snapshotDir / suitePathSegments
+    val fullName = s"$suiteName/${testCase.name}"
+    val key = stampDigests.keyFor(suiteName, testCase.name, snapshotDir)
+    val stamp = TestStamp.stampFile(stampRoot, suitePathSegments, testCase.name)
+
+    if (TestStamp.matches(stamp, key)) {
+      // Proven unnecessary: this exact input hash already passed.
+      if (config.verbose) config.output.println(s"$fullName CACHED")
+      return TestResult(testName = fullName, passed = true, successState = SuccessState.OK,
+                        output = "", diff = None, durationMs = 0)
+    }
+
+    if (config.requireStamps) {
+      return TestResult(testName = fullName, passed = false, successState = SuccessState.FAIL,
+                        output = "",
+                        diff = Some(TestStamp.missingStampMessage(suiteName, testCase.name,
+                          s"booktest $fullName")),
+                        durationMs = 0)
+    }
+
+    val result = runTestCaseUncached(testCase, suiteName, suite)
+    // Write ONLY on a genuine pass. A DIFF or FAIL must leave no stamp, or the
+    // next run would skip a case that never passed.
+    if (result.passed && result.successState == SuccessState.OK) {
+      TestStamp.write(stamp, key, suiteName, testCase.name)
+    }
+    result
+  }
+
+  private def runTestCaseUncached(testCase: TestCase, suiteName: String, suite: TestSuite = null): TestResult = {
     // Apply test-root stripping to get the filesystem path
     val suitePath = config.getSuitePath(suiteName)
     val suitePathSegments = os.RelPath(suitePath)
@@ -239,6 +302,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
 
     // Ensure directories exist
     os.makeDir.all(outDir)
+
 
     val testRun = new TestCaseRun(
       testName = testCase.name,
