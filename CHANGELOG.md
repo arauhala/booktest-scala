@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.4.7 (2026-08-23)
+
+### Feature: content-addressed result cache (`-C` / `--require-cache`)
+
+A cache entry records that a case **passed for a given input hash**, so a later
+run that hashes to the same value can skip it — the Bazel / Gradle build-cache
+idea. The point is to let a PR be accepted on the proof that the suite passed
+locally, while master and deployment keep running everything.
+
+```bash
+booktest -C                 # local: skip what is provably unchanged
+booktest --require-cache    # CI: refuse to run; accept the proof or fail
+booktest --verify-cache     # nightly: run for real, audit the claims
+```
+
+**An entry is a cache with a fallback, never an authority.** Absent, malformed,
+unreadable, or a different key all mean *run the test*. There is no code path
+where a bad entry means "passed".
+
+The key has two halves: a shared half (main code + dependency jars,
+locale/timezone, `-p`) and a per-case half covering that case's accepted
+snapshots plus **the test code its suite reaches**, followed transitively
+through the class-file constant pool. So editing one test file re-runs that
+suite rather than the whole module — measured on this repo, an edit to one
+suite re-ran 4 of 128 cases and served the other 124 from cache. Cross-module
+isolation is free: the classpath *is* the module closure.
+
+The key is **portable by construction** — derived from content only, never from
+absolute paths, mtimes, or classpath order — which is what lets an entry written
+on a laptop be honoured on a CI runner with different paths and a fresh
+checkout. Content-hashing the whole classpath costs ~0.6s once per run on a
+170 MB classpath.
+
+Entries live in one committed `_test-cache.manifest` per snapshot root, not a
+file per case: at ~2,400 cases a per-file layout would turn a four-file PR into
+a 2,400-file diff, and any two concurrent PRs would conflict in all of them.
+
+`-c` and `-C` are siblings on purpose: `-c` skips what passed in the **last
+run**, `-C` skips what passed for **these inputs, ever**.
+
+Nothing degrades quietly — an undiscoverable classpath, or a suite whose
+compiled class cannot be found, *refuses* with an explanation rather than
+falling back to a constant, because a key that does not depend on the code
+answers "cached" for code it has never seen.
+
+**`--require-cache` is for pull requests only.** A merge commit's tree differs
+from the PR head whenever the base has moved, so no entry can exist for it and
+nobody can produce one ahead of time. Run master with `-C`.
+
+
 ## 0.4.6 (2026-06-06)
 
 ### Fix: separate tmp dir from asset dir (tmp files no longer leak into Git)
