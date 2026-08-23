@@ -182,6 +182,11 @@ object TestStamp {
         ).mkString("\n"))
     }.getOrElse(())
 
+  /** Delete a stamp that has been proven wrong. Best-effort: failing to remove
+    * it must not fail the run, and the verifier has already recorded the
+    * violation, which is the part that matters. */
+  def invalidate(file: Path): Unit = Try(os.remove(file)).getOrElse(())
+
   /** What CI prints when it refuses to run on a miss. */
   def missingStampMessage(suiteName: String, caseName: String, runner: String): String =
     s"""No valid result stamp for $suiteName/$caseName.

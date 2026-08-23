@@ -39,6 +39,13 @@ case class RunConfig(
   // Neither flag has a path where a missing or malformed stamp means "passed".
   useStamps: Boolean = false,
   requireStamps: Boolean = false,
+  // --verify-stamps: THE ORACLE. Run every case from scratch, consulting no
+  // cache, and compare the real verdict against what the stamps CLAIM. A stamp
+  // that says "passed" for a case that now fails at the same key means the key
+  // is INCOMPLETE — some input changed that the hash does not cover. Without
+  // this, an incomplete key is discovered months later, as a mystery; with it,
+  // the same night, as a named case. Intended to run nightly, from scratch.
+  verifyStamps: Boolean = false,
   stampDir: Option[Path] = None,  // default: <snapshotDir>/_stamps
   // --trace / BOOKTEST_TRACE=1: also write the structured event log to
   // <outputDir>/.booktest.log. The runner always keeps a bounded
@@ -244,6 +251,15 @@ class TestRunner(config: RunConfig = RunConfig()) {
     * with stamps disabled never pays for it. */
   private lazy val stampDigests: TestStamp.Digests = TestStamp.digests(config.threads)
 
+  /** Cases where a stamp claimed a pass that a real run did not reproduce.
+    * Non-empty means the KEY is incomplete — a far more serious finding than
+    * any single failing case. Mutable and synchronised: -pN runs cases on
+    * several threads. */
+  private val stampViolations = scala.collection.mutable.ListBuffer[String]()
+
+  /** Names of cases whose stamp lied, for the caller/report. */
+  def staleStamps: List[String] = stampViolations.synchronized { stampViolations.toList }
+
   private def stampRoot: Path = config.stampDir.getOrElse(config.snapshotDir / "_stamps")
 
   /**
@@ -258,7 +274,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
    * refuses and says how to produce the stamp (--require-stamps).
    */
   def runTestCase(testCase: TestCase, suiteName: String, suite: TestSuite = null): TestResult = {
-    if (!config.useStamps && !config.requireStamps) return runTestCaseUncached(testCase, suiteName, suite)
+    if (!config.useStamps && !config.requireStamps && !config.verifyStamps)
+      return runTestCaseUncached(testCase, suiteName, suite)
 
     val suitePathSegments = os.RelPath(config.getSuitePath(suiteName))
     val snapshotDir = config.snapshotDir / suitePathSegments
@@ -266,7 +283,38 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val key = stampDigests.keyFor(suiteName, testCase.name, snapshotDir)
     val stamp = TestStamp.stampFile(stampRoot, suitePathSegments, testCase.name)
 
-    if (TestStamp.matches(stamp, key)) {
+    val claimed = TestStamp.matches(stamp, key)
+
+    if (config.verifyStamps) {
+      // The oracle: consult NOTHING, run for real, then hold the result up
+      // against the claim. Deliberately does not write or refresh stamps — an
+      // oracle that also produces the thing it audits is not an oracle.
+      val real = runTestCaseUncached(testCase, suiteName, suite)
+      if (claimed && !real.passed) {
+        // The cache would have skipped a case that does not pass. That is the
+        // failure this mode exists to catch, and it is louder than the test
+        // failure itself: it means the KEY is wrong, not just this case.
+        stampViolations.synchronized { stampViolations += fullName }
+        TestStamp.invalidate(stamp)   // a stamp that has lied once must not lie again
+        return real.copy(diff = Some(
+          s"""STALE STAMP — THE CACHE KEY IS INCOMPLETE.
+             |
+             |A stamp claimed $fullName passes for the current input hash, but a
+             |from-scratch run of it did not pass. Some input that affects this
+             |result is NOT part of the key, so the cache would have reported
+             |success for a tree that fails.
+             |
+             |The offending stamp has been deleted. Do not "fix" this by
+             |re-stamping: find the missing input and add it to TestStamp's key
+             |(and bump TestStamp.KeyVersion).
+             |
+             |Underlying failure:
+             |""".stripMargin + real.diff.getOrElse("(no diff)")))
+      }
+      return real
+    }
+
+    if (claimed) {
       // Proven unnecessary: this exact input hash already passed.
       if (config.verbose) config.output.println(s"$fullName CACHED")
       return TestResult(testName = fullName, passed = true, successState = SuccessState.OK,

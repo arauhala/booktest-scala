@@ -30,6 +30,7 @@ class TestStampTest extends TestSuite {
   private def quietConfig(tempDir: os.Path,
                           useStamps: Boolean = false,
                           requireStamps: Boolean = false,
+                          verifyStamps: Boolean = false,
                           accept: Boolean = false): RunConfig = {
     val logStream = new java.io.PrintStream(
       new java.io.FileOutputStream((tempDir / "runner.log").toIO))
@@ -43,7 +44,8 @@ class TestStampTest extends TestSuite {
       // UPDATED even for an explicitly failed case, which would mask both.
       updateSnapshots = accept,
       useStamps = useStamps,
-      requireStamps = requireStamps)
+      requireStamps = requireStamps,
+      verifyStamps = verifyStamps)
   }
 
   private def stamps(tempDir: os.Path): Seq[os.Path] =
@@ -174,5 +176,50 @@ class TestStampTest extends TestSuite {
     t.tln("")
     t.tln("failure message:")
     r.diff.foreach(d => d.linesIterator.foreach(l => t.tln(s"  $l")))
+  }
+
+  /** THE ORACLE. Simulate an incomplete key: forge a stamp claiming a case
+    * passes at its current key, when the case actually fails. A from-scratch
+    * verifying run must NOTICE — that is the only defence against a key that
+    * omits an input, and the reason the verifier must exist before anyone
+    * leans on the cache. */
+  def testVerifierCatchesALyingStamp(t: TestCaseRun): Unit = {
+    t.h1("The verifier catches a stamp that claims a pass the code does not deliver")
+
+    val dir = t.tmpDir("verify")
+    os.makeDir.all(dir)
+
+    // Forge exactly the stamp an incomplete key would have left behind: valid
+    // for the CURRENT inputs, for a case that does not pass.
+    val suiteName = "booktest.test.StampFailer"
+    val caseName = "alwaysFails"
+    // Derive the suite path exactly as the runner does, rather than hand-writing
+    // it — getSuitePath applies test-root stripping, so a guess here would forge
+    // a stamp at a path the runner never looks at, and the test would "pass" by
+    // testing nothing.
+    val cfg = quietConfig(dir, useStamps = true)
+    val suitePath = os.RelPath(cfg.getSuitePath(suiteName))
+    val key = TestStamp.digests(cfg.threads).keyFor(suiteName, caseName, cfg.snapshotDir / suitePath)
+    val stamp = TestStamp.stampFile(cfg.snapshotDir / "_stamps", suitePath, caseName)
+    TestStamp.write(stamp, key, suiteName, caseName)
+    t.tln(s"forged a stamp claiming $caseName passes: ${os.exists(stamp)}")
+
+    // With the cache TRUSTED, that lie would be believed and the case skipped.
+    val trusting = new TestRunner(cfg).runSuite(new StampFailer())
+    t.tln(s"with --stamps, the forged claim is believed: passed=${trusting.results.head.passed}")
+    assert(trusting.results.head.passed, "precondition: a valid stamp does cause a skip")
+
+    // The verifier runs it for real and refuses the claim.
+    val runner = new TestRunner(quietConfig(dir, verifyStamps = true))
+    val verified = runner.runSuite(new StampFailer())
+    t.tln(s"with --verify-stamps, the claim is refused: passed=${verified.results.head.passed}")
+    t.tln(s"stale stamps reported: ${runner.staleStamps.mkString(", ")}")
+    t.tln(s"the lying stamp was deleted: ${!os.exists(stamp)}")
+
+    assert(!verified.results.head.passed, "the verifier must report the real verdict")
+    assert(runner.staleStamps.nonEmpty, "the verifier must NAME the case whose stamp lied")
+    assert(verified.results.head.diff.exists(_.contains("THE CACHE KEY IS INCOMPLETE")),
+      "the message must point at the key, not just the test")
+    assert(!os.exists(stamp), "a stamp that lied once must be deleted")
   }
 }
