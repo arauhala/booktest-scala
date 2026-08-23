@@ -27,6 +27,18 @@ class StampFailer extends TestSuite {
  */
 class TestStampTest extends TestSuite {
 
+  /** keyFor refuses suites it cannot find compiled, so use one that exists. */
+  private val RealSuite = "booktest.test.StampPasser"
+
+  /** An assertion that reads as a claim in the book AND hard-fails on
+    * regression, so the snapshot documents the contract instead of just
+    * recording whatever happened. */
+  private def check(t: TestCaseRun, claim: String, cond: Boolean): Unit = {
+    t.reviewln(claim, cond)
+    if (!cond) t.fail(s"failed: $claim")
+  }
+
+
   private def quietConfig(tempDir: os.Path,
                           useStamps: Boolean = false,
                           requireStamps: Boolean = false,
@@ -66,11 +78,11 @@ class TestStampTest extends TestSuite {
     os.makeDir.all(dir)
     val d = TestStamp.digests(1)
 
-    val before = d.keyFor("Suite", "case", dir)
+    val before = d.keyFor(RealSuite, "case", dir)
     os.write.over(dir / "case.md", "expected A")
-    val afterA = d.keyFor("Suite", "case", dir)
+    val afterA = d.keyFor(RealSuite, "case", dir)
     os.write.over(dir / "case.md", "expected B")
-    val afterB = d.keyFor("Suite", "case", dir)
+    val afterB = d.keyFor(RealSuite, "case", dir)
 
     t.tln(s"no snapshot : ${before.take(12)}")
     t.tln(s"snapshot A  : ${afterA.take(12)}")
@@ -85,8 +97,8 @@ class TestStampTest extends TestSuite {
     t.h1("The key covers parallelism")
     val dir = t.tmpDir("key-par")
     os.makeDir.all(dir)
-    val k1 = TestStamp.digests(1).keyFor("Suite", "case", dir)
-    val k4 = TestStamp.digests(4).keyFor("Suite", "case", dir)
+    val k1 = TestStamp.digests(1).keyFor(RealSuite, "case", dir)
+    val k4 = TestStamp.digests(4).keyFor(RealSuite, "case", dir)
     t.tln(s"-p1: ${k1.take(12)}")
     t.tln(s"-p4: ${k4.take(12)}")
     assert(k1 != k4, "-p must be part of the key")
@@ -212,10 +224,14 @@ class TestStampTest extends TestSuite {
     val suitePath = os.RelPath(cfg.getSuitePath(suiteName))
     val manifest = cfg.snapshotDir / "_stamps.manifest"
     val fullName = s"$suiteName/$caseName"
-    val forged = new StampStore(manifest, TestStamp.digests(cfg.threads))
-    forged.record(fullName, TestStamp.snapshotDigest(cfg.snapshotDir / suitePath, caseName))
+    val digests = TestStamp.digests(cfg.threads)
+    // Again: compute the per-case digest through the same call the runner uses,
+    // so the forgery is the real thing and not a value only this test believes.
+    val caseDigest = digests.caseDigest(suiteName, caseName, cfg.snapshotDir / suitePath)
+    val forged = new StampStore(manifest, digests)
+    forged.record(fullName, caseDigest)
     forged.flush()
-    t.tln(s"forged a stamp claiming $caseName passes: ${stamps(dir).contains(s"$fullName ${TestStamp.snapshotDigest(cfg.snapshotDir / suitePath, caseName)}")}")
+    t.tln(s"forged a stamp claiming $caseName passes: ${stamps(dir).contains(s"$fullName $caseDigest")}")
 
     // With the cache TRUSTED, that lie would be believed and the case skipped.
     val trusting = new TestRunner(cfg).runSuite(new StampFailer())
@@ -234,5 +250,109 @@ class TestStampTest extends TestSuite {
     assert(verified.results.head.diff.exists(_.contains("THE CACHE KEY IS INCOMPLETE")),
       "the message must point at the key, not just the test")
     assert(stamps(dir).isEmpty, "a stamp that lied once must be deleted")
+  }
+
+  /** Per-suite granularity: editing ONE suite's test code must invalidate that
+    * suite, not every suite in the module. Cross-MODULE isolation is already
+    * free (the key hashes the real classpath, and the classpath is the module
+    * closure), so this is the part that had to be built. */
+  def testEditingOneSuiteDoesNotInvalidateAnother(t: TestCaseRun): Unit = {
+    t.h1("Editing one suite's test code invalidates that suite only")
+
+    t.tln("A per-case key folds in the test code that case's suite REACHES, so an")
+    t.tln("edit to one test file moves only the suites whose closure contains it.")
+    t.tln("What follows checks the three properties that have to hold for it to be useful.")
+    t.tln("")
+    t.tln("Note this book prints RELATIONS, never digests: a digest of the test tree")
+    t.tln("changes whenever this very file is edited, so printing one would make the")
+    t.tln("snapshot diff on every unrelated change and teach the reviewer to ignore it.")
+
+    // runtimeClasspathEntries, not java.class.path: under unforked sbt the
+    // system property holds only the launcher jar (this test is what caught that).
+    // Test code may arrive as a directory OR as sbt's background-job
+    // `*-tests.jar`; ask TestStamp which entries carry it rather than assuming.
+    val dirs = TestStamp.runtimeClasspathEntries().filter(TestStamp.isTestArtifact)
+    check(t, "the classpath carries compiled test code", dirs.nonEmpty)
+
+    val index = new TestStamp.TestIndex(dirs)
+    val passer = index.digestFor("booktest.test.StampPasser")
+    val failer = index.digestFor("booktest.test.StampFailer")
+
+    t.h2("1. Distinct suites get distinct digests")
+    t.tln("If two suites hashed alike, editing one would invalidate the other and the")
+    t.tln("granularity would be fictional.")
+    check(t, "StampPasser and StampFailer hash differently", passer != failer)
+
+    t.h2("2. A suite that drives another DEPENDS on it")
+    t.tln("This test class instantiates both helper suites, so both must appear in its")
+    t.tln("closure. Miss that edge and editing a helper leaves a stale pass for its driver —")
+    t.tln("the under-approximation that makes a cache lie.")
+    val selfClosure = index.closure("booktest.test.TestStampTest")
+    check(t, "TestStampTest's closure contains StampPasser",
+      selfClosure.exists(_.contains("StampPasser")))
+    check(t, "TestStampTest's closure contains StampFailer",
+      selfClosure.exists(_.contains("StampFailer")))
+
+    t.h2("3. ...but the dependency is not symmetric")
+    t.tln("The helper must NOT reach back into its driver. Without this asymmetry every")
+    t.tln("suite would transitively reach every other and the closure would be the module.")
+    val helperClosure = index.closure("booktest.test.StampPasser")
+    check(t, "StampPasser's closure excludes TestStampTest",
+      !helperClosure.exists(_.contains("TestStampTest")))
+    check(t, "the driver's closure is strictly larger than the helper's",
+      selfClosure.size > helperClosure.size)
+  }
+
+  /** The fail-loud contract on the other side: a suite whose compiled class the
+    * index cannot see must be REFUSED, not stamped with a constant. That case is
+    * how a per-suite key silently degrades back into "cache forever". */
+  def testUnknownSuiteIsRefused(t: TestCaseRun): Unit = {
+    t.h1("A suite with no compiled class is refused, not stamped")
+    val d = TestStamp.digests(1)
+    val err = try {
+      d.digestFor_forTest("no.such.Suite"); "no exception"
+    } catch { case e: IllegalStateException => e.getMessage }
+    t.tln(err)
+    assert(err.contains("no compiled class found"), "must name the actual problem")
+    assert(err.contains("no.such.Suite"), "must name the suite")
+  }
+
+  /** The property CI depends on: a stamp is written on a laptop under one path
+    * and must be honoured on a runner under a different path, from a fresh
+    * checkout with fresh mtimes. So the classpath digest must depend on CONTENT
+    * and nothing else. If this test ever fails, stamps silently stop matching
+    * anywhere except the machine that wrote them. */
+  def testClasspathDigestIsPortable(t: TestCaseRun): Unit = {
+    t.h1("The classpath digest survives a different path and fresh mtimes")
+
+    val root = t.tmpDir("portable")
+    val a = root / "home-laptop" / "target" / "classes"
+    val b = root / "runner-work" / "job-7" / "target" / "classes"
+    os.makeDir.all(a / "pkg"); os.makeDir.all(b / "pkg")
+    val bytes = Array[Byte](1, 2, 3, 4, 5)
+    os.write.over(a / "pkg" / "X.class", bytes)
+    os.write.over(b / "pkg" / "X.class", bytes)
+    // A fresh checkout does not preserve mtimes; make them differ on purpose.
+    java.nio.file.Files.setLastModifiedTime(
+      (b / "pkg" / "X.class").toNIO, java.nio.file.attribute.FileTime.fromMillis(0L))
+
+    val da = TestStamp.classpathDigest(Seq(a))
+    val db = TestStamp.classpathDigest(Seq(b))
+    t.ttable(Seq("checkout", "digest"),
+      Seq(Seq("laptop path, current mtime", da.take(16)),
+          Seq("runner path, epoch mtime", db.take(16))))
+    assert(da == db, "same bytes at a different path/mtime must give the same digest")
+
+    // Classpath ORDER is not promised by the build tool either.
+    val c = root / "second"; os.makeDir.all(c)
+    os.write.over(c / "Y.class", Array[Byte](9))
+    assert(TestStamp.classpathDigest(Seq(a, c)) == TestStamp.classpathDigest(Seq(c, a)),
+      "classpath order must not change the key")
+
+    // And it must still notice an actual change.
+    os.write.over(b / "pkg" / "X.class", Array[Byte](1, 2, 3, 4, 6))
+    val changed = TestStamp.classpathDigest(Seq(b))
+    t.tln(s"after editing one class byte: ${changed.take(16)}")
+    assert(changed != db, "a content change MUST change the digest")
   }
 }

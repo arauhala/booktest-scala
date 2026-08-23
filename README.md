@@ -238,11 +238,33 @@ booktest --require-stamps    # CI: refuse to run; accept the proof or fail
 booktest --verify-stamps     # nightly: run for real, audit the claims
 ```
 
-The key covers the **entire compiled classpath**, the case's accepted snapshots,
-locale/timezone, and `-p`. That is deliberately conservative: any code change
-invalidates every stamp. It over-invalidates, but it cannot *under*-invalidate,
-and the failure mode of over-invalidating is a wasted run rather than a green
-build for a tree nobody ran.
+The key is in two halves:
+
+| half | covers | moving it re-runs |
+|---|---|---|
+| shared | main code + dependency jars, locale/timezone, `-p` | everything |
+| per case | that case's accepted snapshots, and the **test code its suite reaches** | that suite |
+
+So editing one test file re-runs that suite, not the module — the suite's own
+compiled classes plus everything they reference, followed transitively through
+the constant pool. Editing main code still invalidates everything, which is
+correct: main code is upstream of every suite. The closure deliberately
+**over**-approximates (a reference through a shared helper pulls the helper's
+whole class in). Over-approximating costs a needless re-run; under-approximating
+is a stale pass, so the bias is the safe one.
+
+Cross-module isolation comes free from the same mechanism: the classpath *is*
+the module closure, so a module that isn't on the classpath can't be in the key.
+
+**The key is portable by construction** — derived from content only, never from
+absolute paths, mtimes, or classpath order. This is what lets a stamp written on
+a laptop be honoured on a CI runner, where every path differs and a fresh
+checkout has fresh mtimes. `classpathDigestIsPortable` pins it.
+
+**Nothing degrades quietly.** If the classpath can't be discovered, or a suite's
+compiled class isn't found, stamping *refuses* with an explanation rather than
+falling back to a constant — a key that doesn't depend on the code is a cache
+that answers "cached" for code it has never seen.
 
 `--require-stamps` writes no stamps, so CI can never mint its own proof. Use it
 on pull requests only — a merge commit's tree differs from the PR head whenever

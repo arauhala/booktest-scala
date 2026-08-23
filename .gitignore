@@ -14,6 +14,10 @@ project/project/
 # Booktest runtime files (not committed to Git)
 books/.cache/
 books/.out/
+# booktest's own suite runs in ~3s, so a committed manifest here would be pure
+# churn — every commit invalidates it. CONSUMERS commit theirs; that is the
+# whole point (see README, "Result stamps").
+books/_stamps.manifest
 
 # OS files
 .DS_Store

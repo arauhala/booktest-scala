@@ -283,7 +283,9 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val suitePathSegments = os.RelPath(config.getSuitePath(suiteName))
     val snapshotDir = config.snapshotDir / suitePathSegments
     val fullName = s"$suiteName/${testCase.name}"
-    val snapDigest = TestStamp.snapshotDigest(snapshotDir, testCase.name)
+    // Covers this case's snapshots AND the test code its suite reaches, so an
+    // edit to one test file invalidates that suite rather than the module.
+    val snapDigest = stampDigests.caseDigest(suiteName, testCase.name, snapshotDir)
 
     val claimed = stampStore.matches(fullName, snapDigest)
 
