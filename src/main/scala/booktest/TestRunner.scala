@@ -260,7 +260,10 @@ class TestRunner(config: RunConfig = RunConfig()) {
   /** Names of cases whose stamp lied, for the caller/report. */
   def staleStamps: List[String] = stampViolations.synchronized { stampViolations.toList }
 
-  private def stampRoot: Path = config.stampDir.getOrElse(config.snapshotDir / "_stamps")
+  /** One manifest for the whole run, not a file per case — see StampStore for
+    * why (a file per case makes every code commit a ~2,400-file diff). */
+  private lazy val stampStore: StampStore =
+    new StampStore(config.stampDir.getOrElse(config.snapshotDir / "_stamps.manifest"), stampDigests)
 
   /**
    * Result-cache wrapper around the real runner.
@@ -280,10 +283,9 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val suitePathSegments = os.RelPath(config.getSuitePath(suiteName))
     val snapshotDir = config.snapshotDir / suitePathSegments
     val fullName = s"$suiteName/${testCase.name}"
-    val key = stampDigests.keyFor(suiteName, testCase.name, snapshotDir)
-    val stamp = TestStamp.stampFile(stampRoot, suitePathSegments, testCase.name)
+    val snapDigest = TestStamp.snapshotDigest(snapshotDir, testCase.name)
 
-    val claimed = TestStamp.matches(stamp, key)
+    val claimed = stampStore.matches(fullName, snapDigest)
 
     if (config.verifyStamps) {
       // The oracle: consult NOTHING, run for real, then hold the result up
@@ -295,7 +297,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
         // failure this mode exists to catch, and it is louder than the test
         // failure itself: it means the KEY is wrong, not just this case.
         stampViolations.synchronized { stampViolations += fullName }
-        TestStamp.invalidate(stamp)   // a stamp that has lied once must not lie again
+        stampStore.invalidate(fullName)   // a stamp that has lied once must not lie again
+        stampStore.flush()
         return real.copy(diff = Some(
           s"""STALE STAMP — THE CACHE KEY IS INCOMPLETE.
              |
@@ -333,7 +336,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
     // Write ONLY on a genuine pass. A DIFF or FAIL must leave no stamp, or the
     // next run would skip a case that never passed.
     if (result.passed && result.successState == SuccessState.OK) {
-      TestStamp.write(stamp, key, suiteName, testCase.name)
+      stampStore.record(fullName, snapDigest)
+      stampStore.flush()
     }
     result
   }

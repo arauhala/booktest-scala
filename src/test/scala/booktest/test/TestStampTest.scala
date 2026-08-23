@@ -48,10 +48,14 @@ class TestStampTest extends TestSuite {
       verifyStamps = verifyStamps)
   }
 
-  private def stamps(tempDir: os.Path): Seq[os.Path] =
-    if (os.exists(tempDir / "_stamps"))
-      os.walk(tempDir / "_stamps").filter(_.last.endsWith(".stamp"))
-    else Seq.empty
+  /** Per-case entries recorded in the manifest (comment and shared-digest
+    * lines excluded). */
+  private def stamps(tempDir: os.Path): Seq[String] = {
+    val f = tempDir / "_stamps.manifest"
+    if (!os.exists(f)) Seq.empty
+    else os.read.lines(f).map(_.trim).filter(l =>
+      l.nonEmpty && !l.startsWith("#") && !l.contains("="))
+  }
 
   /** The key must change when an input changes — here, the accepted snapshot.
     * If it did not, editing an expectation would keep the stale pass. */
@@ -95,24 +99,31 @@ class TestStampTest extends TestSuite {
 
     val dir = t.tmpDir("corrupt")
     os.makeDir.all(dir)
-    val f = dir / "x.stamp"
-    val key = "abc123"
+    val f = dir / "m.manifest"
+    val d = TestStamp.digests(1)
+    val name = "Suite/x"
+    val snap = "snapdigest"
 
-    t.reviewln("absent stamp does not match", TestStamp.matches(f, key) == false)
-    assert(!TestStamp.matches(f, key), "absent must not match")
+    def store = new StampStore(f, d)
 
-    os.write.over(f, "this is not a stamp at all")
-    assert(!TestStamp.matches(f, key), "malformed must not match")
+    assert(!store.matches(name, snap), "absent manifest must not match")
 
-    os.write.over(f, "key=someotherkey\n")
-    assert(!TestStamp.matches(f, key), "different key must not match")
+    os.write.over(f, "this is not a manifest at all")
+    assert(!store.matches(name, snap), "malformed must not match")
+
+    os.write.over(f, s"keyVersion=${TestStamp.KeyVersion}\nclasspath=WRONG\nenv=${d.environment}\n$name $snap\n")
+    assert(!store.matches(name, snap), "a STALE CLASSPATH must invalidate every entry")
+
+    os.write.over(f, s"keyVersion=${TestStamp.KeyVersion}\nclasspath=${d.classpath}\nenv=${d.environment}\n$name otherdigest\n")
+    assert(!store.matches(name, snap), "a different snapshot digest must not match")
 
     os.write.over(f, "")
-    assert(!TestStamp.matches(f, key), "empty must not match")
+    assert(!store.matches(name, snap), "empty must not match")
 
-    TestStamp.write(f, key, "Suite", "x")
-    assert(TestStamp.matches(f, key), "a stamp written for this key must match")
-    t.tln("absent / malformed / mismatched / empty all read as MISS; only an exact key matches")
+    val good = store; good.record(name, snap); good.flush()
+    assert(new StampStore(f, d).matches(name, snap), "a recorded pass must match on reload")
+    t.tln("absent / malformed / stale-classpath / wrong-snapshot / empty all read as MISS")
+    t.tln("only a manifest whose SHARED digests and per-case digest both match is a hit")
   }
 
   /** A failing case must leave no stamp — otherwise the next run skips a case
@@ -150,7 +161,7 @@ class TestStampTest extends TestSuite {
     assert(second.results.head.passed, "cached run reports pass")
 
     // Now corrupt the stamp: the cache must fall back to RUNNING, not to passing.
-    stamps(dir).foreach(f => os.write.over(f, "key=tampered\n"))
+    os.write.over(dir / "_stamps.manifest", "classpath=tampered\n")
     val third = new TestRunner(quietConfig(dir, useStamps = true)).runSuite(new StampPasser())
     t.tln(s"after tampering, still passed by RE-RUNNING: ${third.results.head.passed}")
     assert(third.results.head.passed, "a tampered stamp must cause a re-run, and the test still passes")
@@ -199,10 +210,12 @@ class TestStampTest extends TestSuite {
     // testing nothing.
     val cfg = quietConfig(dir, useStamps = true)
     val suitePath = os.RelPath(cfg.getSuitePath(suiteName))
-    val key = TestStamp.digests(cfg.threads).keyFor(suiteName, caseName, cfg.snapshotDir / suitePath)
-    val stamp = TestStamp.stampFile(cfg.snapshotDir / "_stamps", suitePath, caseName)
-    TestStamp.write(stamp, key, suiteName, caseName)
-    t.tln(s"forged a stamp claiming $caseName passes: ${os.exists(stamp)}")
+    val manifest = cfg.snapshotDir / "_stamps.manifest"
+    val fullName = s"$suiteName/$caseName"
+    val forged = new StampStore(manifest, TestStamp.digests(cfg.threads))
+    forged.record(fullName, TestStamp.snapshotDigest(cfg.snapshotDir / suitePath, caseName))
+    forged.flush()
+    t.tln(s"forged a stamp claiming $caseName passes: ${stamps(dir).contains(s"$fullName ${TestStamp.snapshotDigest(cfg.snapshotDir / suitePath, caseName)}")}")
 
     // With the cache TRUSTED, that lie would be believed and the case skipped.
     val trusting = new TestRunner(cfg).runSuite(new StampFailer())
@@ -214,12 +227,12 @@ class TestStampTest extends TestSuite {
     val verified = runner.runSuite(new StampFailer())
     t.tln(s"with --verify-stamps, the claim is refused: passed=${verified.results.head.passed}")
     t.tln(s"stale stamps reported: ${runner.staleStamps.mkString(", ")}")
-    t.tln(s"the lying stamp was deleted: ${!os.exists(stamp)}")
+    t.tln(s"the lying stamp was deleted: ${stamps(dir).isEmpty}")
 
     assert(!verified.results.head.passed, "the verifier must report the real verdict")
     assert(runner.staleStamps.nonEmpty, "the verifier must NAME the case whose stamp lied")
     assert(verified.results.head.diff.exists(_.contains("THE CACHE KEY IS INCOMPLETE")),
       "the message must point at the key, not just the test")
-    assert(!os.exists(stamp), "a stamp that lied once must be deleted")
+    assert(stamps(dir).isEmpty, "a stamp that lied once must be deleted")
   }
 }
