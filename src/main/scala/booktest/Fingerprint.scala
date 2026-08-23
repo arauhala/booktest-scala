@@ -99,7 +99,40 @@ object Fingerprint {
         }
       Some(hex(md.digest()))
     } else if (os.isFile(path)) {
-      Some(hex(sha256().digest(os.read.bytes(path))))
+      // Hash what the jar CONTAINS, not how it was packed.
+      //
+      // Raw bytes are not reproducible across machines even when every class
+      // inside is identical: zip entry order follows directory traversal, and
+      // compression settings and metadata vary. sbt hands `runMain` freshly
+      // PACKAGED jars of the project's own code (under target/bg-jobs/), so
+      // keying on jar bytes made the key machine-specific — every class file
+      // matched between a laptop and a runner, and the key still differed.
+      //
+      // Sorted (entry name, bytes) is stable under all of that, and is exactly
+      // the content that determines behaviour.
+      val jar = new java.util.jar.JarFile(path.toIO)
+      try {
+        val md = sha256()
+        val names = {
+          val b = List.newBuilder[String]
+          val it = jar.entries()
+          while (it.hasMoreElements) {
+            val e = it.nextElement()
+            if (!e.isDirectory) b += e.getName
+          }
+          b.result().sorted
+        }
+        names.foreach { n =>
+          md.update(n.getBytes("UTF-8"))
+          val in = jar.getInputStream(jar.getEntry(n))
+          try {
+            val buf = new Array[Byte](16384)
+            var r = in.read(buf)
+            while (r > 0) { md.update(buf, 0, r); r = in.read(buf) }
+          } finally in.close()
+        }
+        Some(hex(md.digest()))
+      } finally jar.close()
     } else {
       // Absent entry: contributes no classes, so it contributes nothing to the
       // key. Recording its path here would only make the key machine-specific.

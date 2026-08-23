@@ -424,4 +424,58 @@ class TestCacheTest extends TestSuite {
     check(t, "and it refuses for the right reason",
       gated.results.forall(_.diff.exists(_.contains("No valid cache entry"))))
   }
+
+  /** A jar's BYTES are not reproducible across machines; its CONTENTS are.
+    *
+    * Zip entry order follows directory traversal and compression settings vary,
+    * so two jars built from byte-identical class files still differ as files.
+    * sbt hands `runMain` freshly packaged jars of the project's own code, so
+    * keying on jar bytes made the key machine-specific — measured on aito-core,
+    * every class file matched between a laptop and a CI runner and the key
+    * still differed. That is the whole reason `--require-cache` could not be
+    * switched on. */
+  def testJarDigestIgnoresPackaging(t: TestCaseRun): Unit = {
+    t.h1("Two jars with the same contents hash the same, however they were packed")
+
+    val dir = t.tmpDir("jars")
+    os.makeDir.all(dir)
+
+    def buildJar(path: os.Path, entries: Seq[(String, Array[Byte])], level: Int): Unit = {
+      val fos = new java.io.FileOutputStream(path.toIO)
+      val zos = new java.util.zip.ZipOutputStream(fos)
+      zos.setLevel(level)
+      entries.foreach { case (name, bytes) =>
+        val e = new java.util.zip.ZipEntry(name)
+        // Deliberately different timestamps too — another thing that varies.
+        e.setTime(if (level == 0) 0L else 1000000000L)
+        zos.putNextEntry(e); zos.write(bytes); zos.closeEntry()
+      }
+      zos.close()
+    }
+
+    val content = Seq(
+      "a/A.class" -> Array[Byte](1, 2, 3),
+      "b/B.class" -> Array[Byte](4, 5, 6),
+      "c/C.class" -> Array[Byte](7, 8, 9))
+
+    // Same content; different entry ORDER, compression LEVEL and timestamps.
+    buildJar(dir / "one.jar", content, 9)
+    buildJar(dir / "two.jar", content.reverse, 0)
+
+    val sameBytes = os.read.bytes(dir / "one.jar").sameElements(os.read.bytes(dir / "two.jar"))
+    t.tln(s"the two jars are byte-identical as files: $sameBytes")
+    check(t, "precondition: the jars genuinely differ as files", !sameBytes)
+
+    val d1 = Fingerprint.classpathDigest(Seq(dir / "one.jar"))
+    val d2 = Fingerprint.classpathDigest(Seq(dir / "two.jar"))
+    check(t, "but they produce the same digest", d1 == d2)
+
+    // And a real content change must still move it.
+    buildJar(dir / "three.jar", content.map {
+      case ("b/B.class", _) => "b/B.class" -> Array[Byte](4, 5, 7)
+      case other => other
+    }, 9)
+    check(t, "changing one byte inside an entry changes the digest",
+      Fingerprint.classpathDigest(Seq(dir / "three.jar")) != d1)
+  }
 }

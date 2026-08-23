@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.4.9 (2026-08-23)
+
+### Fix: the key was machine-specific, because jars were hashed as FILES
+
+A cache entry written on a laptop could never be accepted on a CI runner —
+which is the entire point of `--require-cache` — and the reason was subtle
+enough to survive several rounds of guessing.
+
+booktest keys on the runtime classpath, read from the CLASSLOADER. Under sbt's
+`runMain` that classpath contains freshly PACKAGED jars of the project's own
+code (in `target/bg-jobs/`), and jar bytes are not reproducible across
+machines: zip entry order follows directory traversal, and compression settings
+and metadata vary. So the key differed even though the compiled code did not.
+
+Measured on a real consumer: all 117 classpath entries from sbt's own view were
+byte-identical between a developer machine and a runner — every class file in
+all 8 modules — and the key still differed. The packaged jar
+`episto-core_2.12-0.1.0.jar` was `5f210db7…` on CI and `9b3eecaa…` locally.
+
+Jars are now hashed by sorted (entry name, entry contents) instead of file
+bytes. Same measurement with the fix: `8e40c132…` on both. Costs ~1.8s per run
+on a 97 MB classpath, against the test time it exists to save.
+
+`jarDigestIgnoresPackaging` pins it: two jars built from identical content with
+different entry order, compression level and timestamps must produce the same
+digest, while changing one byte inside an entry must still change it.
+
+
 ## 0.4.8 (2026-08-23)
 
 ### Fix: concurrent captures corrupted stdout, silently losing output

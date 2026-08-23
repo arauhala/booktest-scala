@@ -229,8 +229,9 @@ Two traps this code has already fallen into, both now covered by
   case that cannot pass (forge an entry; a consulted cache skips it), and prove
   the gate with cases that would pass if run.
 
-The key must stay **portable**: content only, never absolute paths, mtimes, or
-classpath order — otherwise an entry written on a laptop can never be honoured
+The key must stay **portable**: content only, never absolute paths, mtimes,
+classpath order, **or jar file bytes** (zip packaging is not reproducible across
+machines — hash sorted entry-name/contents instead; this one cost a day) — otherwise an entry written on a laptop can never be honoured
 in CI, which is the whole point. `classpathDigestIsPortable` pins this.
 
 
