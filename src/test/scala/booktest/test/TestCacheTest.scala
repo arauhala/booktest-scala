@@ -43,7 +43,8 @@ class TestCacheTest extends TestSuite {
                           useCache: Boolean = false,
                           requireCache: Boolean = false,
                           verifyCache: Boolean = false,
-                          accept: Boolean = false): RunConfig = {
+                          accept: Boolean = false,
+                          threads: Int = 1): RunConfig = {
     val logStream = new java.io.PrintStream(
       new java.io.FileOutputStream((tempDir / "runner.log").toIO))
     RunConfig(
@@ -55,6 +56,7 @@ class TestCacheTest extends TestSuite {
       // testing failure or cache behaviour: it rewrites the snapshot and reports
       // UPDATED even for an explicitly failed case, which would mask both.
       updateSnapshots = accept,
+      threads = threads,
       useCache = useCache,
       requireCache = requireCache,
       verifyCache = verifyCache)
@@ -355,5 +357,68 @@ class TestCacheTest extends TestSuite {
     val changed = Fingerprint.classpathDigest(Seq(b))
     t.tln(s"after editing one class byte: ${changed.take(16)}")
     assert(changed != db, "a content change MUST change the digest")
+  }
+
+  /** Parallel runs must use the cache exactly like sequential ones.
+    *
+    * They did not: `-pN` takes a SEPARATE execution path, and while the cache
+    * logic lived only in the sequential one, parallel runs consulted nothing
+    * and wrote nothing. Found in a real consumer whose CI runs `-p4` — the very
+    * configuration the feature exists for — where `--require-cache` silently
+    * degraded into "run everything", a gate that does not gate. */
+  def testParallelRunsUseTheCache(t: TestCaseRun): Unit = {
+    t.h1("A parallel run uses the cache, like a sequential one")
+
+    t.tln("Each check below is built so it FAILS if the parallel path ignores the")
+    t.tln("cache. That is not automatic: the obvious assertions (\"the run passed\",")
+    t.tln("\"the gated run failed\") hold either way, because a bypassed run simply")
+    t.tln("executes the tests and reaches the same verdict by doing the work.")
+
+    val dir = t.tmpDir("parallel")
+    os.makeDir.all(dir)
+
+    t.h2("It WRITES entries")
+    // Prime snapshots so the cases can reach OK (only a genuine pass is cached).
+    new TestRunner(quietConfig(dir, accept = true, threads = 4)).runSuite(new CachePasser())
+    val first = new TestRunner(quietConfig(dir, useCache = true, threads = 4))
+      .runSuite(new CachePasser())
+    check(t, "the parallel run passes", first.results.forall(_.passed))
+    check(t, "a parallel run writes entries", cacheEntries(dir).nonEmpty)
+
+    t.h2("It CONSULTS entries")
+    t.tln("Proven with a case that CANNOT pass: forge an entry for it, then run it")
+    t.tln("under -p4. A consulted cache skips it and reports a pass; a bypassed one")
+    t.tln("runs it and it fails. The verdict itself is the evidence.")
+    val forgeDir = t.tmpDir("parallel-consult")
+    os.makeDir.all(forgeDir)
+    val cfg = quietConfig(forgeDir, useCache = true, threads = 4)
+    val suiteName = "booktest.test.CacheFailer"
+    val caseName = "alwaysFails"
+    val suitePath = os.RelPath(cfg.getSuitePath(suiteName))
+    val digests = Fingerprint.digests(cfg.threads)
+    val store = new CacheManifest(cfg.snapshotDir / Fingerprint.ManifestName, digests)
+    store.record(s"$suiteName/$caseName",
+      digests.caseDigest(suiteName, caseName, cfg.snapshotDir / suitePath))
+    store.flush()
+    val consulted = new TestRunner(cfg).runSuite(new CacheFailer())
+    check(t, "a parallel run skips a case that has an entry",
+      consulted.results.head.passed)
+
+    t.h2("The --require-cache gate still bites")
+    t.tln("With snapshots primed but NO manifest, these cases would pass if they ran.")
+    t.tln("So a failure here can only come from the gate refusing — not from the")
+    t.tln("tests themselves failing.")
+    val gateDir = t.tmpDir("parallel-gate")
+    os.makeDir.all(gateDir)
+    new TestRunner(quietConfig(gateDir, accept = true, threads = 4)).runSuite(new CachePasser())
+    val wouldPass = new TestRunner(quietConfig(gateDir, threads = 4)).runSuite(new CachePasser())
+    check(t, "precondition: these cases pass when actually run",
+      wouldPass.results.forall(_.passed))
+    val gated = new TestRunner(quietConfig(gateDir, requireCache = true, threads = 4))
+      .runSuite(new CachePasser())
+    check(t, "with no manifest, --require-cache refuses under -p4",
+      gated.results.forall(r => !r.passed))
+    check(t, "and it refuses for the right reason",
+      gated.results.forall(_.diff.exists(_.contains("No valid cache entry"))))
   }
 }

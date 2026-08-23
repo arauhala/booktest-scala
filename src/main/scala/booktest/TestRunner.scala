@@ -268,17 +268,27 @@ class TestRunner(config: RunConfig = RunConfig()) {
   /**
    * Result-cache wrapper around the real runner.
    *
-   * Deliberately a WRAPPER: `runTestCaseUncached` has several return paths
+   * Deliberately a WRAPPER: the real runners have several return paths
    * (snapshot verdict, explicit fail, exception) inside one try/catch/finally,
    * and an entry must be written on exactly one of them. Wrapping means the
    * write cannot miss a path, and the skip decision is made before any work.
    *
+   * It takes the runner as a THUNK because there are two of them: the
+   * sequential path and the separate parallel one (`executeTestSilently`).
+   * When this logic lived inside the sequential path only, `-pN` silently
+   * bypassed the cache entirely — nothing consulted, nothing written, and
+   * `--require-cache` degraded into "run everything" precisely where it was
+   * meant to gate. One wrapper, both callers, so they cannot drift again.
+   *
    * Never turns a miss into a pass. A miss either runs the test (--cache) or
    * refuses and says how to produce the entry (--require-cache).
    */
-  def runTestCase(testCase: TestCase, suiteName: String, suite: TestSuite = null): TestResult = {
+  def runTestCase(testCase: TestCase, suiteName: String, suite: TestSuite = null): TestResult =
+    withCache(testCase, suiteName)(() => runTestCaseUncached(testCase, suiteName, suite))
+
+  private def withCache(testCase: TestCase, suiteName: String)(run: () => TestResult): TestResult = {
     if (!config.useCache && !config.requireCache && !config.verifyCache)
-      return runTestCaseUncached(testCase, suiteName, suite)
+      return run()
 
     val suitePathSegments = os.RelPath(config.getSuitePath(suiteName))
     val snapshotDir = config.snapshotDir / suitePathSegments
@@ -293,7 +303,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
       // The oracle: consult NOTHING, run for real, then hold the result up
       // against the claim. Deliberately does not write or refresh cache entries — an
       // oracle that also produces the thing it audits is not an oracle.
-      val real = runTestCaseUncached(testCase, suiteName, suite)
+      val real = run()
       if (claimed && !real.passed) {
         // The cache would have skipped a case that does not pass. That is the
         // failure this mode exists to catch, and it is louder than the test
@@ -337,7 +347,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
                         durationMs = 0)
     }
 
-    val result = runTestCaseUncached(testCase, suiteName, suite)
+    val result = run()
     // Write ONLY on a genuine pass. A DIFF or FAIL must leave no entry, or the
     // next run would skip a case that never passed.
     if (result.passed && result.successState == SuccessState.OK) {
@@ -1241,7 +1251,8 @@ class TestRunner(config: RunConfig = RunConfig()) {
               // Submit test execution to thread pool
               executor.submit {
                 try {
-                  val result = executeTestSilently(testCase, suiteName, suite)
+                  val result =
+                    withCache(testCase, suiteName)(() => executeTestSilently(testCase, suiteName, suite))
                   reportQueue.put(TestReportMessage.Completed(testCase.name, result))
                 } catch {
                   case NonFatal(rawErr) =>

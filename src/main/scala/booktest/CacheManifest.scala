@@ -105,10 +105,16 @@ class CacheManifest(file: Path, digests: Fingerprint.Digests) {
   def isEmpty: Boolean = lock.synchronized { entries.isEmpty }
 
   /** Write the manifest, sorted, so the file is stable and its diffs are
-    * meaningful rather than reordered noise. */
+    * meaningful rather than reordered noise.
+    *
+    * A write failure THROWS. Swallowing it would produce a cache that silently
+    * never persists — indistinguishable, from the outside, from a cache that
+    * simply never hits, and it would waste a developer's full local run before
+    * CI rejected the PR anyway. Reading a manifest is best-effort (an
+    * unreadable one just means "run the tests"); writing one is not. */
   def flush(): Unit = lock.synchronized {
     if (!dirty) return
-    Try {
+    try {
       os.makeDir.all(file / os.up)
       val body = Seq(
         "# booktest cache entries — cases that PASSED for the inputs recorded here.",
@@ -123,6 +129,12 @@ class CacheManifest(file: Path, digests: Fingerprint.Digests) {
         entries.toSeq.sortBy(_._1).map { case (n, s) => s"$n $s" }
       os.write.over(file, body.mkString("\n") + "\n")
       dirty = false
-    }.getOrElse(())
+    } catch {
+      case e: Exception =>
+        throw new IllegalStateException(
+          s"booktest cache: failed to write the manifest at $file. The run's results " +
+          "cannot be recorded, so nothing would be cached and the reason would be " +
+          s"invisible. Cause: ${e.getMessage}", e)
+    }
   }
 }
