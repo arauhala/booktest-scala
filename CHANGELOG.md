@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.8 (2026-08-23)
+
+### Fix: concurrent captures corrupted stdout, silently losing output
+
+Every multi-suite `-pN` run printed no `N/N test succeeded` summary. That looked
+like a missing feature; it was lost output.
+
+`LogCapture` redirected process-wide `System.out` while saving "the original"
+per instance, so concurrent captures interleaved and one of them restored
+*another capture's* stream. From then on everything written to `System.out`
+landed in a buffer nobody reads. Per-test result lines survived because they go
+through the runner's own stream, captured before any redirection — which is why
+only the summary vanished and the cause looked cosmetic.
+
+Fixed by removing the save/restore step rather than synchronising it: one
+multiplexing stream is installed once and never restored, dispatching to a
+per-thread sink and falling back to the console. Nothing shared and mutable is
+left to race on. The thread-local is inheritable, so a test that spawns threads
+still has their output captured with it, and captures nest correctly.
+
+If you print from test code and want it captured, use `System.out.println`:
+scala's `Console` caches its stream at first use and bypasses the multiplexer.
+
+
 ## 0.4.7 (2026-08-23)
 
 ### Feature: content-addressed result cache (`-C` / `--require-cache`)

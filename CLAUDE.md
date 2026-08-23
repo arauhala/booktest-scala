@@ -177,6 +177,32 @@ class MethodRefTests extends TestSuite {
 
 ## Advanced Features
 
+### Output capture (`LogCapture` / `OutputMux`)
+
+`System.out` is global, capture is per-test, and `-pN` runs tests concurrently.
+That combination already produced one silent bug: saving/restoring `System.out`
+per capture raced, and a capture restored *another capture's* stream, leaving
+stdout pointing at a buffer nobody reads. It surfaced as "multi-suite `-pN`
+prints no summary" — lost output masquerading as a missing feature.
+
+So there is now exactly one stream, installed once by `OutputMux` and never
+restored; captures register a per-thread sink. **Do not add a save/restore of
+`System.out` anywhere.** If you need a third execution path, it just works —
+there is nothing to wire.
+
+Two traps when testing this (both hit during the fix):
+
+- **`System.out.println`, not `println`.** scala's `Console` caches its stream
+  at first use, so a plain `println` bypasses the multiplexer and a test written
+  with it passes without testing anything.
+- **Do not observe by swapping `System.out`** — the multiplexer *is*
+  `System.out`, so replacing it defeats the mechanism under test. Use an outer
+  capture as the observer; that works in any context. The first version of the
+  test passed standalone and failed inside the full suite.
+
+Cases that touch process-wide stdout must declare
+`override protected def resourceLocks: List[String] = List("system-out")`.
+
 ### Result cache (`-C` / `--require-cache` / `--verify-cache`)
 
 A cache entry records that a case **passed for a given input hash**, so a later
