@@ -575,4 +575,50 @@ class TestCacheTest extends TestSuite {
     val c1 = Fingerprint.digests(1).caseDigest("booktest.test.CachePasser", "case", dir)
     check(t, "the per-case digest still depends on -p", c4 != c1)
   }
+
+  /** Build metadata (a generated BuildInfo with a timestamp or git revision)
+    * must be excludable from the key.
+    *
+    * It does not affect whether a test passes, but it changes the jar every
+    * build — and for a consumer that COMMITS its manifest, committing changes
+    * the commit, changes the git-derived BuildInfo, and would invalidate the
+    * manifest on the very commit carrying it. `booktest.cache.excludePaths` lets
+    * the consumer declare such classes non-semantic. */
+  def testExcludedPathsAreIgnoredInTheKey(t: TestCaseRun): Unit = {
+    t.h1("Declared build-metadata classes are excluded from the digest")
+
+    val dir = t.tmpDir("excl")
+    os.makeDir.all(dir / "app"); os.makeDir.all(dir / "buildInfo")
+    os.write.over(dir / "app" / "Real.class", "real code v1")
+    os.write.over(dir / "buildInfo" / "BuildInfo.class", "builtAt=100")
+
+    val prop = "booktest.cache.excludePaths"
+    val saved = Option(System.getProperty(prop))
+    try {
+      System.setProperty(prop, "buildInfo/")
+      val before = Fingerprint.classpathDigest(Seq(dir))
+
+      // Change ONLY the excluded class — digest must not move.
+      os.write.over(dir / "buildInfo" / "BuildInfo.class", "builtAt=999999")
+      val afterMetadata = Fingerprint.classpathDigest(Seq(dir))
+      check(t, "changing an excluded build-metadata class does NOT change the key",
+        before == afterMetadata)
+
+      // Change a REAL class — digest must move.
+      os.write.over(dir / "app" / "Real.class", "real code v2")
+      val afterReal = Fingerprint.classpathDigest(Seq(dir))
+      check(t, "changing a real class DOES change the key", afterReal != before)
+
+      // With no exclusion configured, the metadata change is visible again.
+      System.setProperty(prop, "")
+      os.write.over(dir / "buildInfo" / "BuildInfo.class", "builtAt=100")
+      val noExcludeA = Fingerprint.classpathDigest(Seq(dir))
+      os.write.over(dir / "buildInfo" / "BuildInfo.class", "builtAt=222")
+      val noExcludeB = Fingerprint.classpathDigest(Seq(dir))
+      check(t, "without exclusion, the metadata change IS visible", noExcludeA != noExcludeB)
+    } finally saved match {
+      case Some(v) => System.setProperty(prop, v)
+      case None    => System.clearProperty(prop)
+    }
+  }
 }

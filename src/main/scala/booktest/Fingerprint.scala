@@ -88,10 +88,36 @@ object Fingerprint {
    *
    * Computed ONCE per run and reused for every case (see `Digests`).
    */
+  /** Class-name prefixes to exclude from the classpath digest, from the system
+    * property `booktest.cache.excludePaths` (comma-separated, internal form
+    * e.g. `com/knowledgegarden/episto/buildInfo/`).
+    *
+    * The point is BUILD METADATA. A generated BuildInfo class embeds things like
+    * a build timestamp or the git revision — inputs that do NOT affect whether a
+    * test passes, but DO change the jar every build (or every commit). Worse, a
+    * consumer that COMMITS its manifest changes the commit, which changes the
+    * git-derived BuildInfo, which would invalidate the manifest on the very
+    * commit that carries it. Excluding these classes breaks that circle. It is
+    * sound because a real code change still shows up in the real classes; only
+    * the non-semantic metadata is dropped.
+    *
+    * Set it identically at generation and verification (e.g. in a committed
+    * .sbtopts), or the two keys will differ. */
+  // A def, not a lazy val: read the property each time so it cannot be captured
+  // stale before it is set (and so tests can vary it). The cost is a trivial
+  // property read per classpath entry.
+  private def excludedPrefixes: Seq[String] =
+    sys.props.getOrElse("booktest.cache.excludePaths", "")
+      .split(",").map(_.trim).filter(_.nonEmpty).toSeq
+
+  private def isExcluded(internalName: String): Boolean =
+    excludedPrefixes.exists(internalName.startsWith)
+
   private def entryDigest(path: Path): Option[String] = Try {
     if (os.isDir(path)) {
       val md = sha256()
       os.walk(path).filter(f => os.isFile(f) && f.last.endsWith(".class"))
+        .filterNot(f => isExcluded(f.relativeTo(path).toString))
         .sortBy(_.relativeTo(path).toString)
         .foreach { f =>
           md.update(f.relativeTo(path).toString.getBytes("UTF-8"))
@@ -127,7 +153,7 @@ object Fingerprint {
           val it = jar.entries()
           while (it.hasMoreElements) {
             val e = it.nextElement()
-            if (!e.isDirectory) b += e.getName
+            if (!e.isDirectory && !isExcluded(e.getName)) b += e.getName
           }
           b.result().sorted
         }

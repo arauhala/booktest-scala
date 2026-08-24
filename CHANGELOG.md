@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.4.12 (2026-08-24)
+
+### Feature: exclude build metadata from the cache key (`booktest.cache.excludePaths`)
+
+A generated `BuildInfo` class typically embeds a build timestamp or the git
+revision — inputs that do NOT affect whether a test passes but DO change the jar
+every build. Worse, a consumer that COMMITS its manifest changes the commit,
+which changes the git-derived `BuildInfo`, which would invalidate the manifest
+on the very commit that carries it — a circular self-invalidation.
+
+Set `-Dbooktest.cache.excludePaths=<comma-separated internal-name prefixes>`
+(e.g. `com/acme/buildInfo/`) and those classes are dropped from the classpath
+digest. Sound because a real code change still shows up in the real classes;
+only the non-semantic metadata is ignored. Set it identically at generation and
+verification (a committed `.sbtopts` is the natural home), or the two keys
+differ.
+
+`excludedPathsAreIgnoredInTheKey` pins it: an excluded class changing does not
+move the key, a real class changing does, and with no exclusion configured the
+metadata change is visible again.
+
+
 ## 0.4.11 (2026-08-24)
 
 ### Fix: mixing parallelism levels in one manifest wiped evidence
