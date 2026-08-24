@@ -621,4 +621,38 @@ class TestCacheTest extends TestSuite {
       case None    => System.clearProperty(prop)
     }
   }
+
+  /** Case names with SPACES must round-trip through the manifest.
+    *
+    * booktest case names are often notebook-style sentences ("openLinked
+    * resolves linked attrs via data"). The manifest stores "<name> <digest>"
+    * space-separated, and the loader split on the FIRST space — so every name
+    * with a space was mis-parsed, its entry lost, and a --require-cache job
+    * failed on exactly those cases while space-free ones passed. Found on a
+    * real 814-case manifest: one case out of 814. */
+  def testManifestRoundTripsNamesWithSpaces(t: TestCaseRun): Unit = {
+    t.h1("A cache entry whose case name contains spaces survives a reload")
+
+    val dir = t.tmpDir("spaces")
+    os.makeDir.all(dir)
+    val digests = Fingerprint.digests(1)
+    val file = dir / Fingerprint.ManifestName
+
+    val spacey = "Suite/openLinked resolves linked attrs via data.variableData"
+    val plain  = "Suite/candidate-rooted-no-spaces"
+    val dA = "a" * 64
+    val dB = "b" * 64
+
+    val w = new CacheManifest(file, digests)
+    w.record(spacey, dA)
+    w.record(plain, dB)
+    w.flush()
+
+    // Reload from disk — this is where the first-space split corrupted the name.
+    val r = new CacheManifest(file, digests)
+    check(t, "the space-free entry round-trips", r.matches(plain, dB))
+    check(t, "the SPACE-containing entry round-trips", r.matches(spacey, dA))
+    // And a wrong digest is still rejected (the name parse must not swallow the digest).
+    check(t, "a wrong digest for the spacey name is refused", !r.matches(spacey, dB))
+  }
 }

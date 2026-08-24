@@ -56,9 +56,19 @@ class CacheManifest(file: Path, digests: Fingerprint.Digests) {
         if (line.startsWith("keyVersion=")) loadedKeyVersion = Some(line.stripPrefix("keyVersion="))
         else if (line.startsWith("classpath=")) loadedClasspath = Some(line.stripPrefix("classpath="))
         else if (line.startsWith("env=")) loadedEnv = Some(line.stripPrefix("env="))
-        else line.split("\\s+", 2) match {
-          case Array(name, snap) => entries(name) = snap
-          case _ => ()  // unparseable line: ignored, which means "no entry", which means "run it"
+        else {
+          // The digest is the LAST whitespace-delimited token; the name may
+          // contain spaces (booktest case names are often notebook-style
+          // sentences, e.g. "openLinked resolves linked attrs via data"). Parse
+          // from the RIGHT — splitting on the FIRST space corrupted every name
+          // with a space, so those cases silently missed the cache and a
+          // --require-cache job failed on them while every space-free case
+          // passed. The write format ("name digest") was already fine; only
+          // this reader was wrong.
+          val i = line.lastIndexWhere(_.isWhitespace)
+          if (i > 0 && i < line.length - 1)
+            entries(line.substring(0, i).trim) = line.substring(i + 1)
+          // else: unparseable line ignored, which means "no entry" -> "run it"
         }
       }
     }

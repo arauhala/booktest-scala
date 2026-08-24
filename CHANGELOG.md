@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.13 (2026-08-24)
+
+### Fix: manifest reader corrupted case names containing spaces
+
+The manifest stores `<name> <digest>` space-separated, and the loader split on
+the FIRST whitespace. booktest case names are frequently notebook-style
+sentences ("openLinked resolves linked attrs via data"), so every name with a
+space was mis-parsed — its entry lost on reload — and a `--require-cache` job
+failed on exactly those cases while every space-free case passed. Found on a
+real 814-case manifest: one failing case out of 814, wedged an entire CI run.
+
+The digest is a fixed 64-hex token with no whitespace, so the reader now parses
+it as the LAST whitespace-delimited token and keeps everything before it as the
+name. The write format was already correct, so existing manifests parse
+correctly with no regeneration.
+
+`manifestRoundTripsNamesWithSpaces` pins it.
+
+
 ## 0.4.12 (2026-08-24)
 
 ### Feature: exclude build metadata from the cache key (`booktest.cache.excludePaths`)
