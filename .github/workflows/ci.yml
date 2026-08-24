@@ -41,6 +41,77 @@ jobs:
       - name: Run meta tests (parallel)
         run: sbt ++3.3.1 "Test/runMain booktest.BooktestMain -p4 test"
 
+  # ------------------------------------------------------------------------
+  # Result-cache portability self-test.
+  #
+  # Every bug in the --require-cache work (keying on sbt-launch.jar, hashing jar
+  # BYTES instead of contents, and mixing -p levels in one manifest) shared one
+  # shape: a manifest produced on one machine was refused on another, or clobbered
+  # itself, even though the code was identical. Each was found only after
+  # publishing to Maven Central and testing in a downstream repo — four releases.
+  #
+  # These two jobs reproduce that end to end WITHOUT any publish: one runner
+  # generates the evidence, a SECOND, fresh runner (different paths, different
+  # bg-jobs jars, fresh checkout) must accept it under --require-cache. If the
+  # key is not portable, cache-verify fails here, on the PR, before release.
+  # ------------------------------------------------------------------------
+  cache-generate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21, cache: sbt }
+      - uses: sbt/setup-sbt@v1
+
+      # Mirror a real consumer's topology: a parallel sweep of most suites, then
+      # a SERIAL guard of a DIFFERENT suite, both into one manifest. (The two
+      # sets are disjoint on purpose — a single case cannot live at two -p values,
+      # and mirroring that is the point.) This is exactly what used to wipe the
+      # sweep when -p was part of the shared digest.
+      - name: Evidence — sweep at -p4
+        run: sbt ++3.3.1 "Test/runMain booktest.BooktestMain -p4 -C test/TmpDirSeparationTest test/FilterAndDependencyTest"
+      - name: Evidence — serial guard at -p1 (same manifest, different suite)
+        run: sbt ++3.3.1 "Test/runMain booktest.BooktestMain -p1 -C test/TokenMarkerTest"
+
+      - name: The -p1 guard must not have wiped the -p4 sweep
+        run: |
+          set -euo pipefail
+          have() { grep -q "^booktest.test.$1/" books/_test-cache.manifest; }
+          echo "manifest contents:"; grep -v '^#' books/_test-cache.manifest || true
+          have TmpDirSeparationTest    || { echo "FAIL: TmpDirSeparationTest (sweep, -p4) was wiped"; exit 1; }
+          have FilterAndDependencyTest  || { echo "FAIL: FilterAndDependencyTest (sweep, -p4) was wiped"; exit 1; }
+          have TokenMarkerTest          || { echo "FAIL: TokenMarkerTest (guard, -p1) missing"; exit 1; }
+          echo "OK: sweep and guard evidence coexist"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-cache-manifest
+          path: books/_test-cache.manifest
+          retention-days: 1
+
+  cache-verify:
+    needs: cache-generate
+    runs-on: ubuntu-latest      # a fresh runner: different paths, freshly packaged jars
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21, cache: sbt }
+      - uses: sbt/setup-sbt@v1
+
+      - name: Bring in the manifest produced on the OTHER runner
+        uses: actions/download-artifact@v4
+        with:
+          name: test-cache-manifest
+          path: books/
+
+      # Each suite is verified at the -p it was recorded at. A miss means the key
+      # is machine-specific — the exact failure the downstream releases surfaced,
+      # now caught here on the PR with no publish.
+      - name: Require-cache accepts the foreign sweep (-p4)
+        run: sbt ++3.3.1 "Test/runMain booktest.BooktestMain -p4 --require-cache test/TmpDirSeparationTest test/FilterAndDependencyTest"
+      - name: Require-cache accepts the foreign guard (-p1)
+        run: sbt ++3.3.1 "Test/runMain booktest.BooktestMain -p1 --require-cache test/TokenMarkerTest"
+
   cross-compile:
     runs-on: ubuntu-latest
     strategy:
