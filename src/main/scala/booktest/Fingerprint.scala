@@ -172,13 +172,19 @@ object Fingerprint {
    * can mask assertions, and at least one suite is pinned to -p1.
    */
   def environmentDigest(parallelism: Int): String = {
+    val _ = parallelism  // retained for source compatibility; see note below
     val md = sha256()
     val props = Seq("user.language", "user.country", "user.timezone", "java.specification.version")
     props.foreach { k => md.update(s"$k=${sys.props.getOrElse(k, "")}".getBytes("UTF-8")) }
     Seq("LANG", "LC_ALL", "TZ").foreach { k =>
       md.update(s"$k=${sys.env.getOrElse(k, "")}".getBytes("UTF-8"))
     }
-    md.update(s"p=$parallelism".getBytes("UTF-8"))
+    // NOTE: parallelism is deliberately NOT here. It moved to the per-CASE
+    // digest (see caseDigest). A real CI run executes the -p4 sweep AND -p1
+    // serial guards against ONE manifest; with -p in the shared digest the two
+    // runs had different shared keys, so the second wiped the first's entries.
+    // Parallelism affects whether a *case* passes (races), so it is a per-case
+    // input, not a run-wide one.
     hex(md.digest())
   }
 
@@ -402,7 +408,7 @@ object Fingerprint {
 
   /** Run-wide digests, computed once and shared by every case. */
 
-  case class Digests(classpath: String, environment: String, testIndex: TestIndex) {
+  case class Digests(classpath: String, environment: String, testIndex: TestIndex, parallelism: Int) {
     /** The per-case half of the key: this case's accepted snapshots AND the
       * test code its suite reaches. `classpath` (main code + jars) is the
       * shared half, recorded once in the manifest.
@@ -416,7 +422,12 @@ object Fingerprint {
       val md = sha256()
       Seq(KeyVersion, suiteName, caseName,
           snapshotDigest(snapshotDir, caseName),
-          testIndex.digestFor(suiteName)).foreach { s =>
+          testIndex.digestFor(suiteName),
+          // Parallelism belongs to the case, not the run: a case can pass at
+          // -p1 and fail at -p4 (process-wide cache races — the reason serial
+          // guards exist). Keying it here lets one manifest hold the -p4 sweep
+          // and the -p1 guards side by side, each case tied to the -p it ran at.
+          s"p=$parallelism").foreach { s =>
         md.update(s.getBytes("UTF-8")); md.update(0.toByte)
       }
       hex(md.digest())
@@ -459,7 +470,8 @@ object Fingerprint {
     Digests(
       classpath = classpathDigest(rest),
       environment = environmentDigest(parallelism),
-      testIndex = index)
+      testIndex = index,
+      parallelism = parallelism)
   }
 
   /** What CI prints when it refuses to run on a miss.

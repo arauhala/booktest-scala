@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.4.11 (2026-08-24)
+
+### Fix: mixing parallelism levels in one manifest wiped evidence
+
+Parallelism was part of the SHARED environment digest. A real CI run executes
+the `-p4` sweep and then `-p1` serial guards (suites excluded from the parallel
+sweep because of process-wide cache races) against ONE manifest — and because
+the two runs had different shared digests, the second cleared the first's
+entries (`CacheManifest` drops all entries when the shared digest changes, by
+design). On a real consumer this silently reduced a 705-case server manifest to
+59 and an 807-case core manifest to 10.
+
+Parallelism affects whether a *case* passes, not the whole run, so it is now
+part of the per-case digest. One manifest can hold the `-p4` sweep and the
+`-p1` guards side by side, each case tied to the `-p` it ran at, while a pass
+cached at one `-p` is still never honoured for a run at another.
+
+`mixedParallelismManifestDoesNotSelfWipe` pins it.
+
+
 ## 0.4.10 (2026-08-23)
 
 ### Fix: the cache key still depended on how the BUILD TOOL was installed

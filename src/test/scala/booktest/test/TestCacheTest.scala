@@ -10,6 +10,10 @@ class CachePasser extends TestSuite {
 }
 
 /** Helper: a case that explicitly fails. It must never leave an entry behind. */
+class CachePasser2 extends TestSuite {
+  def testStable(t: TestCaseRun): Unit = { t.tln("also stable") }
+}
+
 class CacheFailer extends TestSuite {
   def testAlwaysFails(t: TestCaseRun): Unit = {
     t.tln("some output")
@@ -527,5 +531,48 @@ class TestCacheTest extends TestSuite {
     os.write.over(dir / "b" / "dep.jar", "real dependency, changed")
     val changed = Fingerprint.classpathDigest(Seq(dir / "b" / "dep.jar"))
     check(t, "changing a real dependency still changes the key", changed != withA)
+  }
+
+  /** A single manifest must hold entries from runs at DIFFERENT parallelism.
+    *
+    * A real CI run executes the -p4 sweep and then -p1 serial guards against
+    * ONE manifest. When parallelism lived in the shared env digest, the two
+    * runs had different shared keys, so the -p1 guards WIPED the -p4 sweep's
+    * entries (CacheManifest clears on a shared-digest change, by design). On
+    * aito-core that reduced a 705-case server manifest to 59. Parallelism is
+    * now per-case, so the two coexist. */
+  def testMixedParallelismManifestDoesNotSelfWipe(t: TestCaseRun): Unit = {
+    t.h1("A -p1 run does not erase a -p4 run's evidence in the same manifest")
+
+    val dir = t.tmpDir("mixed-p")
+    os.makeDir.all(dir)
+    // Prime snapshots so both can reach OK.
+    new TestRunner(quietConfig(dir, accept = true, threads = 4)).runSuite(new CachePasser())
+
+    // Record the "sweep" at -p4.
+    new TestRunner(quietConfig(dir, useCache = true, threads = 4)).runSuite(new CachePasser())
+    val afterP4 = cacheEntries(dir)
+    check(t, "the -p4 run wrote entries", afterP4.nonEmpty)
+
+    // Now a -p1 "guard" against the SAME manifest, for a DIFFERENT suite so
+    // there is no legitimate overwrite.
+    new TestRunner(quietConfig(dir, accept = true, threads = 1)).runSuite(new CachePasser2())
+    new TestRunner(quietConfig(dir, useCache = true, threads = 1)).runSuite(new CachePasser2())
+    val afterP1 = cacheEntries(dir)
+
+    check(t, "the -p1 run did NOT wipe the -p4 entries",
+      afterP4.forall(e => afterP1.contains(e)))
+    check(t, "and it added its own", afterP1.length > afterP4.length)
+
+    // The shared env digest must be identical across the two -p values now.
+    val e4 = Fingerprint.digests(4).environment
+    val e1 = Fingerprint.digests(1).environment
+    check(t, "the shared env digest is independent of -p", e4 == e1)
+
+    // ...while the per-case digest still distinguishes them, so a pass cached
+    // at -p1 cannot be honoured for a -p4 run of the same case.
+    val c4 = Fingerprint.digests(4).caseDigest("booktest.test.CachePasser", "case", dir)
+    val c1 = Fingerprint.digests(1).caseDigest("booktest.test.CachePasser", "case", dir)
+    check(t, "the per-case digest still depends on -p", c4 != c1)
   }
 }
