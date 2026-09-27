@@ -399,6 +399,28 @@ object BooktestMain {
 
     result.printSummary()
 
+    // A fatal error that escaped to a thread's top level FAILS THE RUN, even when
+    // every case that finished reported success.
+    //
+    // This is the belt to the case-level catch's braces, and it is needed because
+    // the two see different things: the catch marks a case failed when the error
+    // happens inside its body, while this catches anything that escaped anywhere
+    // else — a reporting path, a pool thread, a server the test spawned. Without
+    // it, `booktest: uncaught java.lang.OutOfMemoryError` was printed to the
+    // console three times in one iodf run and the run still exited 0, leaving
+    // half-written books that the result cache can accept as evidence.
+    val fatal = OutputMux.fatalEscapesSeen
+    if (fatal.nonEmpty) {
+      println()
+      println(s"FATAL: ${fatal.size} throwable(s) escaped to a thread's top level:")
+      fatal.distinct.foreach(f => println(s"  $f"))
+      println("The JVM's state was not trustworthy after this, so no case's verdict")
+      println("in this run can be relied on — including the ones that reported ok.")
+      println("Books written by a killed case may be INCOMPLETE; do not accept them.")
+      throw new BooktestFailure(
+        s"${fatal.size} fatal throwable(s) escaped during the run (first: ${fatal.head})")
+    }
+
     if (!result.success) {
       throw new BooktestFailure(result.summary)
     }

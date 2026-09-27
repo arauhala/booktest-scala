@@ -544,10 +544,28 @@ class TestRunner(config: RunConfig = RunConfig()) {
       }
 
     } catch {
-      case NonFatal(rawErr) =>
+      // NonFatal OR a VirtualMachineError (OutOfMemoryError, StackOverflowError).
+      //
+      // NonFatal alone left a fatal error to escape to the thread's top level,
+      // where the default handler printed it and the run CONTINUED: later cases
+      // reported `ok`, the dead case's book was left half-written, and the exit
+      // code stayed 0. Measured on the iodf suite at 4 GB — three OOMs, all
+      // reported, run green.
+      //
+      // Deliberately NOT `case rawErr: Throwable`. ControlThrowable is neither
+      // NonFatal nor a VirtualMachineError, and it must keep escaping: Scala
+      // compiles `return` inside a closure into NonLocalReturnControl, so
+      // catching it here would silently change what a test body's `return` does.
+      case rawErr: Throwable if NonFatal(rawErr) || rawErr.isInstanceOf[VirtualMachineError] =>
         // Reflection wraps test-method exceptions in InvocationTargetException;
         // unwrap so reports show the underlying cause, not "exception: null".
         val e = TestRunner.unwrapInvocationTarget(rawErr)
+        // A fatal error is latched process-wide as well as failing this case: the
+        // JVM's state is no longer trustworthy, so the RUN must not be able to
+        // report success even if every remaining case passes.
+        if (e.isInstanceOf[VirtualMachineError])
+          OutputMux.recordFatalEscape(
+            s"${e.getClass.getName} in case '${testCase.name}'")
         consumerFailed = true
         // Write exception to output like Python: t.iln(traceback.format_exc())
         // NonFatal catches Errors like NotImplementedError/AssertionError too, so a
@@ -1248,12 +1266,34 @@ class TestRunner(config: RunConfig = RunConfig()) {
               // Send "starting" message to main thread
               reportQueue.put(TestReportMessage.Starting(testCase.name, suiteName))
 
-              // Submit test execution to thread pool
+              // Submit test execution to thread pool.
+              //
+              // LIVENESS CONTRACT: the scheduler loop below polls `reportQueue` for
+              // one Completed message per submitted case and has NO timeout, so a
+              // task that returns without reporting hangs the whole run forever.
+              // That is not hypothetical — it is the three-hour stall measured on
+              // aito-core's iodf suite at 4 GB: the catch below was `NonFatal`,
+              // which excludes `OutOfMemoryError`, so a fatal error skipped BOTH
+              // `put` calls and the scheduler polled `Thread.sleep(10)` for three
+              // hours while holding a machine-wide build lock. Twelve OOMs in one
+              // reproduction, and the JVM was only 767 MB into a 4 GB heap by the
+              // time it wedged — the hang outlived the memory pressure entirely.
+              //
+              // So reporting is made unconditional in a `finally` rather than by
+              // enumerating which throwables to catch. Enumeration is what failed:
+              // whatever escapes next — a new Error subtype, a ControlThrowable —
+              // must still end the scheduler's wait.
               executor.submit {
+                var reported = false
+                def report(r: TestResult): Unit =
+                  if (!reported) {
+                    reported = true
+                    reportQueue.put(TestReportMessage.Completed(testCase.name, r))
+                  }
                 try {
                   val result =
                     withCache(testCase, suiteName)(() => executeTestSilently(testCase, suiteName, suite))
-                  reportQueue.put(TestReportMessage.Completed(testCase.name, result))
+                  report(result)
                 } catch {
                   case NonFatal(rawErr) =>
                     val e = TestRunner.unwrapInvocationTarget(rawErr)
@@ -1269,7 +1309,25 @@ class TestRunner(config: RunConfig = RunConfig()) {
                         TestRunner.formatStackTrace(e)),
                       durationMs = 0
                     )
-                    reportQueue.put(TestReportMessage.Completed(testCase.name, errorResult))
+                    report(errorResult)
+                } finally {
+                  // The guarantee. A fatal error, or anything else the catch above
+                  // does not name, still ends the scheduler's wait — and says so in
+                  // the result, because a silent synthetic pass would be worse than
+                  // the hang it replaces.
+                  if (!reported) {
+                    report(TestResult(
+                      testName = s"${config.getSuitePath(suiteName)}/${testCase.name}",
+                      passed = false,
+                      output = "",
+                      diff = Some(
+                        s"Test '${testCase.name}' did not report a result: a throwable " +
+                        "escaped the worker without being caught (a fatal Error such as " +
+                        "OutOfMemoryError, or a ControlThrowable). Its book may be " +
+                        "INCOMPLETE and must not be accepted. The run is failed rather " +
+                        "than left waiting for a message that will never arrive."),
+                      durationMs = 0))
+                  }
                 }
               }
             }

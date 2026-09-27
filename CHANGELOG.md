@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.4.14 (2026-09-27)
+
+### Fix: a fatal throwable could not fail the run
+
+`OutOfMemoryError` inside `TestCaseRun.getTestOutput` killed a case's thread on
+aito-core's iodf suite at `-Xmx4g`. The message was printed — and the run CARRIED
+ON. Later cases reported `ok`, the killed cases' books were left half-written, and
+the exit code stayed 0. Three such escapes in one run, all reported, run green. A
+half-written book is worse than a missing one: the result cache can accept it as
+evidence for a case that never finished. (The same run then hung for three hours
+holding a machine-wide build lock; liveness is tracked separately.)
+
+The gap is NOT the case-level catch, which is where this was first assumed to be.
+A case whose body throws a `VirtualMachineError` already failed — proved by running
+the new test against unfixed code. What escaped had no case around it:
+`getTestOutput` runs on the output-finalisation path, outside any case's `try`, so
+no case-level catch could ever see it.
+
+So a fatal throwable reaching a thread's top level is now LATCHED process-wide by
+the default uncaught handler, and `BooktestMain` reads that latch after
+`printSummary`: a non-empty latch fails the run, names each escape, and says
+plainly that books written by a killed case may be incomplete and must not be
+accepted. A latch, not a counter, because no later success can retract an escape
+that already happened.
+
+The case-level catch is also widened, from `NonFatal` to
+`NonFatal || VirtualMachineError`, so an in-body fatal names its case in that
+report. Deliberately NOT widened to `Throwable`: `ControlThrowable` is neither, and
+Scala compiles `return` inside a closure into `NonLocalReturnControl` — catching it
+would silently change what a test body's `return` does.
+
+### And it could HANG rather than fail
+
+The same defect had a worse face. `TestRunner.runTestsParallel` submits each case to
+a pool and the scheduler polls `reportQueue` for one Completed message per case, with
+NO timeout. The worker's catch was `NonFatal`, so a fatal error skipped BOTH
+`reportQueue.put` calls and the scheduler polled `Thread.sleep(10)` forever.
+
+Measured: three hours, holding a machine-wide build lock, while `--status` reported
+nothing running. Thread dumps 30 s apart showed the same frame
+(`runTestsParallel$2`, `Thread.sleep`) with CPU creeping — a live poll loop, not a
+deadlock — and the heap only 767 MB into a 4 GB ceiling, so the hang outlived the
+memory pressure that started it. The suite-level path was never affected: it uses
+`Future.get()`, and `FutureTask` catches `Throwable`.
+
+Reporting is now unconditional in a `finally`, not conditional on enumerating which
+throwables to catch — enumeration is what failed. Whatever escapes next still ends
+the scheduler's wait, and the synthetic result says the case's book may be incomplete
+rather than quietly passing.
+
+`FatalErrorTest` pins all three properties: an in-body fatal fails its case and is
+latched, an off-case fatal (spawned thread) is latched with no case to attribute it
+to, and a non-local return still returns its value. `withFatalEscapesIsolated`
+scopes the latch for these tests, restoring any pre-existing entries, so a
+synthetic trip cannot fail the run that tests it — nor hide a real escape.
+
+
 ## 0.4.13 (2026-08-24)
 
 ### Fix: manifest reader corrupted case names containing spaces

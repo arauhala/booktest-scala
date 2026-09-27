@@ -36,6 +36,57 @@ private[booktest] object OutputMux {
   private var realOut: PrintStream = System.out
   private var realErr: PrintStream = System.err
 
+  /** Fatal throwables that escaped to a thread's top level, as one line each.
+    *
+    * Printing them is not enough, and that gap cost a real investigation: an
+    * `OutOfMemoryError` inside `TestCaseRun.getTestOutput` killed a case's
+    * thread, the message went to the console, and the run CARRIED ON — later
+    * cases reported `ok`, the dead case's book was left half-written, and the
+    * exit code stayed 0. A half-written book is worse than a missing one,
+    * because the next `-C` run can accept it as evidence.
+    *
+    * So the fact is LATCHED here, process-wide, and the run's verdict reads it.
+    * A latch rather than a counter reset per case: whatever escaped, escaped,
+    * and no later success can retract it. */
+  private val fatalEscapes = new java.util.concurrent.ConcurrentLinkedQueue[String]()
+
+  private[booktest] def recordFatalEscape(description: String): Unit =
+    fatalEscapes.add(description)
+
+  /** Run `body` with the latch isolated, and report what IT latched.
+    *
+    * Only for booktest's own tests: a test that deliberately throws a
+    * VirtualMachineError would otherwise trip the process-wide latch and fail the
+    * very run that is testing it. Entries present beforehand are put back
+    * afterwards, so a real escape elsewhere in the run cannot be swallowed by a
+    * test that happens to run after it. */
+  private[booktest] def withFatalEscapesIsolated[T](body: => T): (T, List[String]) =
+    synchronized {
+      val preexisting = drainFatalEscapes()
+      try {
+        val out = body
+        // Drained INSIDE the try: if `body` throws, its entries are deliberately
+        // left in the queue, because a genuine escape must not be swallowed by
+        // the helper that was meant to isolate a synthetic one.
+        (out, drainFatalEscapes())
+      } finally preexisting.foreach(fatalEscapes.add)
+    }
+
+  private def drainFatalEscapes(): List[String] = {
+    val b = List.newBuilder[String]
+    var e = fatalEscapes.poll()
+    while (e != null) { b += e; e = fatalEscapes.poll() }
+    b.result()
+  }
+
+  /** Empty when nothing fatal escaped. Read once, at the end of a run. */
+  private[booktest] def fatalEscapesSeen: List[String] = {
+    val it = fatalEscapes.iterator()
+    val b = List.newBuilder[String]
+    while (it.hasNext) b += it.next()
+    b.result()
+  }
+
   /** Idempotent, and safe to call from several threads at once. */
   def install(): Unit = synchronized {
     if (!installed) {
@@ -57,6 +108,7 @@ private[booktest] object OutputMux {
       val previous = Thread.getDefaultUncaughtExceptionHandler
       Thread.setDefaultUncaughtExceptionHandler((t, e) => {
         try {
+          recordFatalEscape(s"${e.getClass.getName} on thread '${t.getName}'")
           realErr.println(s"booktest: uncaught ${e.getClass.getName} on thread '${t.getName}'")
           e.printStackTrace(realErr)
           realErr.flush()
