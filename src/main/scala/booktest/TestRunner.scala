@@ -1216,9 +1216,27 @@ class TestRunner(config: RunConfig = RunConfig()) {
           // observed order becomes non-deterministic.
           val suiteHasLocks =
             suite != null && suite.getResourceLocks.nonEmpty
-          val ready = schedulerLock.synchronized {
-            if (suiteHasLocks && inProgress.nonEmpty) Nil
-            else {
+          // `ready` AND the stuck verdict are decided in ONE critical section.
+          //
+          // They used to be separate: `ready` was computed under the lock, the lock
+          // was released, and the "circular dependency" check below then read
+          // `inProgress` and `completed` unlocked. That is a race with a false
+          // accusation at the end of it. If `ready` was empty because everything was
+          // in flight, and the last in-flight case completed after the lock was
+          // released, the check saw a STALE empty `ready` beside a genuinely empty
+          // `inProgress` and declared a circular dependency that did not exist —
+          // while the tests that had just become ready never ran.
+          //
+          // Observed once in CI under -p4 on a 2-core runner and never locally,
+          // which is what a timing-width race looks like: the window is the few
+          // instructions between the two reads. The hand-off at `inProgress -= …;
+          // completed += …` was already atomic; the OBSERVATION was not. Reading a
+          // mutable.Set unlocked while another thread writes it is also a visibility
+          // race in its own right.
+          val (ready, stuck) = schedulerLock.synchronized {
+            val r =
+              if (suiteHasLocks && inProgress.nonEmpty) Nil
+              else {
               val readyUnranked = testCases.filter { tc =>
                 if (completed.contains(tc.name) || inProgress.contains(tc.name)) false
                 else {
@@ -1242,9 +1260,10 @@ class TestRunner(config: RunConfig = RunConfig()) {
               // When locked, only submit one at a time so order = test list order.
               if (suiteHasLocks) ranked.take(1) else ranked
             }
+            (r, r.isEmpty && inProgress.isEmpty && completed.size < testCases.size)
           }
 
-          if (ready.isEmpty && inProgress.isEmpty && completed.size < testCases.size) {
+          if (stuck) {
             schedulerError = Some(new IllegalStateException("Circular dependency detected or missing dependency"))
           } else if (ready.nonEmpty) {
             // Submit ready tests to worker pool

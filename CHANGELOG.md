@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.4.15 (2026-09-28)
+
+### Fix: the scheduler could falsely accuse a run of a circular dependency
+
+`runTestsParallel` computed `ready` under `schedulerLock`, released the lock, and
+then read `inProgress` and `completed` UNLOCKED to decide whether the run was stuck.
+If `ready` was empty because everything was in flight, and the last in-flight case
+completed in that window, the check saw a STALE empty `ready` beside a genuinely
+empty `inProgress` and aborted the run with
+
+    IllegalStateException: Circular dependency detected or missing dependency
+
+while the tests that had just become ready never ran. The completion hand-off
+(`inProgress -= name; completed += name`) was already atomic; the OBSERVATION was
+not — and reading a `mutable.Set` unlocked while another thread writes it is a
+visibility race besides.
+
+`ready` and the stuck verdict are now decided in one critical section.
+
+Seen once on a 2-core CI runner under `-p4` and never locally, which is the shape of
+a race whose window is a few instructions: a re-run of the same commit passed. It was
+found while investigating that flake, not by it — the flake was blamed on an
+unrelated commit first.
+
 ## 0.4.14 (2026-09-27)
 
 ### Fix: a fatal throwable could not fail the run
