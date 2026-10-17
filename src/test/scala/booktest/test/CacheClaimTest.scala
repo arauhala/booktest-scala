@@ -39,6 +39,12 @@ class CacheClaimHelper extends TestSuite {
   * aito-core's query/LinkPathTest, which walks api-docs/content. Nothing about
   * that file is part of the case key today. */
 class CacheClaimReader extends TestSuite {
+  /** The declaration under test: this suite says what it reads, so the runner
+    * can key on it. Dynamic here only because the meta test owns the temp dir;
+    * a real suite names a fixed path (aito-core's LinkPathTest: api-docs/content). */
+  override protected def runtimeInputs: List[String] =
+    CacheClaimCounters.externalFile.map(_.toString).toList
+
   def testReadsAnExternalFile(t: TestCaseRun): Unit = {
     CacheClaimCounters.readerRuns.incrementAndGet()
     val text = CacheClaimCounters.externalFile.map(p => os.read(p).trim).getOrElse("<unset>")

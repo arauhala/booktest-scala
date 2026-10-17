@@ -65,6 +65,30 @@ abstract class TestSuite {
     */
   protected def resourceLocks: List[String] = List.empty
 
+  /** Paths this suite READS AT RUNTIME, which therefore belong in its cache
+    * key. Declare a file or a directory, relative to the working directory or
+    * absolute; a directory is hashed wholesale, recursively.
+    *
+    * Why this has to be declared rather than detected: the key is built from
+    * the classpath, the accepted snapshots and the suite's own test code. A
+    * file a case `os.read`s at runtime is none of those, so editing it changes
+    * what the case OUTPUTS without changing what it is KEYED on — the stale
+    * entry is then served and the change ships unnoticed, through both `-C`
+    * locally and `--require-cache` in CI (td-20261017005405516224).
+    *
+    * The live instance: aito-core's query/LinkPathTest walks api-docs/content
+    * and harvests every quoted path-shaped string from it, so every one of
+    * those 336 markdown pages is an input to that case.
+    *
+    * Coarse on purpose. Hashing the whole declared directory invalidates more
+    * than strictly necessary; hashing only the files a case touched would be
+    * tighter but needs the case to report them. A cheap extra run beats a
+    * silently stale book. */
+  protected def runtimeInputs: List[String] = List.empty
+
+  /** Read by the runner when it builds this suite's cache key. */
+  private[booktest] def declaredRuntimeInputs: List[String] = runtimeInputs
+
   /** Get resource locks for TestRunner */
   def getResourceLocks: List[String] = resourceLocks
 
