@@ -284,9 +284,32 @@ class TestRunner(config: RunConfig = RunConfig()) {
    * refuses and says how to produce the entry (--require-cache).
    */
   def runTestCase(testCase: TestCase, suiteName: String, suite: TestSuite = null): TestResult =
-    withCache(testCase, suiteName)(() => runTestCaseUncached(testCase, suiteName, suite))
+    withCache(testCase, suiteName, suite)(() => runTestCaseUncached(testCase, suiteName, suite))
 
-  private def withCache(testCase: TestCase, suiteName: String)(run: () => TestResult): TestResult = {
+  /** Whether a cache claim is enough for this case, or whether the case must
+    * run anyway because another case in this suite needs its VALUE and that
+    * value is not on disk.
+    *
+    * A manifest entry answers "did this case pass for this key?" — nothing
+    * more. The VALUE a producer returns lives in `<case>.bin`, which only a
+    * real run writes. `shouldRun` already schedules a producer when its `.bin`
+    * is missing (correctly); without this, `withCache` then intercepted that
+    * scheduled run, found the claim, and returned a synthetic pass, so the
+    * `.bin` was never written and the consumer died with "was auto-run but
+    * produced no cached value" (td-20261015070626241836).
+    *
+    * Narrow on purpose: a case nothing depends on is still served from the
+    * cache. "Never cache a producer" would fix the symptom and gut the feature
+    * (fixture A2 guards that). */
+  private def claimCoversValue(testCase: TestCase, suiteName: String, suite: TestSuite): Boolean = {
+    if (suite == null) return true
+    val dependedUpon = suite.testCases.flatMap(_.dependencies).toSet
+    if (!dependedUpon.contains(testCase.name)) return true
+    val suitePath = config.getSuitePath(suiteName)
+    os.exists(config.outputDir / ".out" / os.RelPath(suitePath) / s"${testCase.name}.bin")
+  }
+
+  private def withCache(testCase: TestCase, suiteName: String, suite: TestSuite = null)(run: () => TestResult): TestResult = {
     if (!config.useCache && !config.requireCache && !config.verifyCache)
       return run()
 
@@ -295,7 +318,10 @@ class TestRunner(config: RunConfig = RunConfig()) {
     val fullName = s"$suiteName/${testCase.name}"
     // Covers this case's snapshots AND the test code its suite reaches, so an
     // edit to one test file invalidates that suite rather than the module.
-    val snapDigest = fingerprint.caseDigest(suiteName, testCase.name, snapshotDir)
+    val declaredInputs =
+      if (suite == null) Nil else suite.declaredRuntimeInputs
+    val snapDigest =
+      fingerprint.caseDigest(suiteName, testCase.name, snapshotDir, declaredInputs)
 
     val claimed = cacheManifest.matches(fullName, snapDigest)
 
@@ -327,6 +353,19 @@ class TestRunner(config: RunConfig = RunConfig()) {
              |""".stripMargin + real.diff.getOrElse("(no diff)")))
       }
       return real
+    }
+
+    if (claimed && !claimCoversValue(testCase, suiteName, suite)) {
+      // The claim is true but insufficient: something here needs this case's
+      // VALUE and the .bin is gone. Run it — a claim is not a value.
+      if (config.verbose)
+        config.output.println(s"$fullName CLAIMED but its value is needed and absent — running")
+      val produced = run()
+      if (produced.passed && produced.successState == SuccessState.OK) {
+        cacheManifest.record(fullName, snapDigest)
+        cacheManifest.flush()
+      }
+      return produced
     }
 
     if (claimed) {
@@ -1311,7 +1350,7 @@ class TestRunner(config: RunConfig = RunConfig()) {
                   }
                 try {
                   val result =
-                    withCache(testCase, suiteName)(() => executeTestSilently(testCase, suiteName, suite))
+                    withCache(testCase, suiteName, suite)(() => executeTestSilently(testCase, suiteName, suite))
                   report(result)
                 } catch {
                   case NonFatal(rawErr) =>

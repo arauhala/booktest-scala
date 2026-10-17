@@ -63,7 +63,11 @@ object Fingerprint {
 
   /** Bump when the key's *meaning* changes, so old entries cannot match new
     * semantics. Cheaper and safer than trying to migrate cache entries. */
-  val KeyVersion = "1"
+  // "2": caseDigest now also hashes a suite's declared runtime inputs
+  // (TestSuite.runtimeInputs, td-20261017005405516224). Bumping this
+  // invalidates every existing manifest, so the next gate in each repo runs for
+  // real once — that is the intended effect of widening the key.
+  val KeyVersion = "2"
 
   private def sha256(): MessageDigest = MessageDigest.getInstance("SHA-256")
 
@@ -444,10 +448,37 @@ object Fingerprint {
       * it, while a main-code edit moves the shared digest and invalidates
       * everything — which is correct, because main code is upstream of all of
       * them. */
-    def caseDigest(suiteName: String, caseName: String, snapshotDir: Path): String = {
+    /** Content of the paths a suite declared via `runtimeInputs`. A missing
+      * path hashes as a marker rather than being skipped: "the input is gone"
+      * must not collide with "the input never existed". */
+    def runtimeInputDigest(paths: Seq[String]): String = {
+      if (paths.isEmpty) return "<none>"
+      val md = sha256()
+      paths.sorted.foreach { raw =>
+        md.update(raw.getBytes("UTF-8"))
+        val p = Try(if (raw.startsWith("/")) Path(raw) else os.pwd / os.RelPath(raw)).toOption
+        p match {
+          case Some(path) if Try(os.isFile(path)).getOrElse(false) =>
+            Try(md.update(os.read.bytes(path))).getOrElse(())
+          case Some(path) if Try(os.isDir(path)).getOrElse(false) =>
+            val files = Try(os.walk(path).filter(os.isFile).sortBy(_.toString)).getOrElse(Nil)
+            files.foreach { f =>
+              md.update(f.relativeTo(path).toString.getBytes("UTF-8"))
+              Try(md.update(os.read.bytes(f))).getOrElse(())
+            }
+          case _ => md.update("<missing>".getBytes("UTF-8"))
+        }
+        md.update(0.toByte)
+      }
+      hex(md.digest())
+    }
+
+    def caseDigest(suiteName: String, caseName: String, snapshotDir: Path,
+                   runtimeInputs: Seq[String] = Nil): String = {
       val md = sha256()
       Seq(KeyVersion, suiteName, caseName,
           snapshotDigest(snapshotDir, caseName),
+          runtimeInputDigest(runtimeInputs),
           testIndex.digestFor(suiteName),
           // Parallelism belongs to the case, not the run: a case can pass at
           // -p1 and fail at -p4 (process-wide cache races — the reason serial
